@@ -19,6 +19,8 @@
 ## Core Mandates
 - **Minimalism**: Favor standard library where possible (e.g., `urllib`) while utilizing `Typer` for CLI ergonomics.
 - **Piping**: Always consider piped input (`stdin`) vs. interactive TTY.
+- **Agent-First Efficiency**: Treat agent latency, serialized response bytes, context/input tokens, and command round trips as first-class product budgets. A generic AI system with only shell access and one compact skill MUST be able to operate the complete workflow; never require MCP, Codex-specific behavior, or hidden skill-side logic. Prefer single-call common workflows, batching where it removes round trips, compact versioned JSON, stable error codes and exit statuses, bounded cursor-based output, and explicit opt-in expansion of verbose fields. Benchmark cold and warm controller paths and assert response-size limits for machine-facing behavior.
+- **Thin, Durable Skill**: Keep the Better Colab skill vendor-neutral and small enough to load cheaply. Use progressive disclosure and CLI-provided machine-readable help/capability discovery instead of duplicating the command manual in the skill. Put operational semantics in the typed runtime and CLI so other agents and automation receive identical behavior without the skill.
 - **Trace Alignment**: When implementing new endpoints, validate against captured browser traces (HAR files).
 - **TDD (Test-Driven Development)**: Always implement tests first. Verify they fail before implementing the solution to make them pass. Every design must include a testing strategy and specific test cases.
 
