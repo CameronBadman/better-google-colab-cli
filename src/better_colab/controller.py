@@ -306,6 +306,14 @@ class ControllerServer:
             return await self._session_probe(params)
         if method == "execution.start":
             return self._start_execution(params)
+        if method == "execution.batch.start":
+            return self._start_batch(params)
+        if method == "execution.batch.status":
+            return self._batch_status(params)
+        if method == "execution.batch.wait":
+            return await self._wait_batch(params)
+        if method == "execution.batch.cancel":
+            return self._cancel_batch(params)
         if method == "execution.status":
             return self._execution_status(params)
         if method == "execution.wait":
@@ -471,6 +479,190 @@ class ControllerServer:
         assert self._coordinator is not None
         self._coordinator.submit(profile, record.execution_id)
         return result
+
+    @staticmethod
+    def _batch_id(params: dict[str, Any]) -> str:
+        batch_id = params.get("batch_id")
+        try:
+            parsed = uuid.UUID(str(batch_id))
+        except (ValueError, TypeError, AttributeError) as error:
+            raise api_error(
+                "INVALID_BATCH_ID",
+                "batch_id must be a UUID",
+                exit_code=ExitCode.USAGE,
+                retryable=False,
+                suggested_action="use_a_batch_uuid",
+            ) from error
+        return str(parsed)
+
+    def _start_batch(self, params: dict[str, Any]) -> dict[str, Any]:
+        profile = self._profile_from_params(params)
+        batch_id = self._batch_id(params)
+        session_name = params.get("session")
+        members = params.get("members")
+        if not isinstance(session_name, str) or not session_name:
+            raise api_error(
+                "SESSION_REQUIRED",
+                "session is required",
+                exit_code=ExitCode.USAGE,
+                retryable=False,
+                suggested_action="specify_session",
+            )
+        if (
+            not isinstance(members, list)
+            or not members
+            or len(members) > MAX_COLLECTION_LIMIT
+        ):
+            raise api_error(
+                "INVALID_BATCH_MEMBERS",
+                f"members must contain 1 to {MAX_COLLECTION_LIMIT} cells",
+                exit_code=ExitCode.USAGE,
+                retryable=False,
+                suggested_action="select_supported_batch_cells",
+            )
+        prepared_members: list[dict[str, Any]] = []
+        for member in members:
+            if not isinstance(member, dict):
+                raise api_error(
+                    "INVALID_BATCH_MEMBER",
+                    "Each batch member must be an object",
+                    exit_code=ExitCode.USAGE,
+                    retryable=False,
+                    suggested_action="fix_batch_request",
+                )
+            execution_id = self._execution_id(member)
+            source = member.get("source")
+            provenance = member.get("provenance")
+            if not isinstance(source, str) or not isinstance(provenance, dict):
+                raise api_error(
+                    "INVALID_BATCH_MEMBER",
+                    "Each member requires UTF-8 source and provenance",
+                    exit_code=ExitCode.USAGE,
+                    retryable=False,
+                    suggested_action="fix_batch_request",
+                )
+            source_bytes = source.encode("utf-8")
+            prepared_members.append(
+                {
+                    "execution_id": execution_id,
+                    "source": source_bytes,
+                    "provenance": provenance,
+                    "request": {
+                        "batch_id": batch_id,
+                        "session": session_name,
+                        "source_sha256": hashlib.sha256(
+                            source_bytes
+                        ).hexdigest(),
+                        "provenance": provenance,
+                    },
+                }
+            )
+        with DurableStore(paths=self.paths, profile=profile) as store:
+            batch = store.create_batch_executions(
+                batch_id=batch_id,
+                session_name=session_name,
+                members=prepared_members,
+                continue_on_error=bool(params.get("continue_on_error", False)),
+            )
+            result = self._batch_result(store, batch)
+        assert self._coordinator is not None
+        self._coordinator.submit_batch(profile, batch_id)
+        return result
+
+    def _batch_status(self, params: dict[str, Any]) -> dict[str, Any]:
+        profile = self._profile_from_params(params)
+        batch_id = self._batch_id(params)
+        with DurableStore(paths=self.paths, profile=profile) as store:
+            batch = store.get_batch(batch_id)
+            if batch is None:
+                raise api_error(
+                    "BATCH_NOT_FOUND",
+                    f"Batch not found: {batch_id}",
+                    exit_code=ExitCode.NOT_FOUND,
+                    retryable=False,
+                    suggested_action="inspect_batch_id",
+                )
+            return self._batch_result(store, batch)
+
+    async def _wait_batch(self, params: dict[str, Any]) -> dict[str, Any]:
+        profile = self._profile_from_params(params)
+        batch_id = self._batch_id(params)
+        timeout = params.get("timeout")
+        if timeout is not None:
+            try:
+                timeout = float(timeout)
+            except (TypeError, ValueError) as error:
+                raise api_error(
+                    "INVALID_WAIT_TIMEOUT",
+                    "wait timeout must be a finite non-negative number",
+                    exit_code=ExitCode.USAGE,
+                    retryable=False,
+                    suggested_action="use_a_nonnegative_timeout",
+                ) from error
+            if not math.isfinite(timeout) or timeout < 0:
+                raise api_error(
+                    "INVALID_WAIT_TIMEOUT",
+                    "wait timeout must be a finite non-negative number",
+                    exit_code=ExitCode.USAGE,
+                    retryable=False,
+                    suggested_action="use_a_nonnegative_timeout",
+                )
+        deadline = None if timeout is None else time.monotonic() + timeout
+        topic = self._topic(self._batch_topic(profile, batch_id))
+        timed_out = False
+        async with topic.condition:
+            while True:
+                with DurableStore(paths=self.paths, profile=profile) as store:
+                    batch = store.get_batch(batch_id)
+                    if batch is None:
+                        raise api_error(
+                            "BATCH_NOT_FOUND",
+                            f"Batch not found: {batch_id}",
+                            exit_code=ExitCode.NOT_FOUND,
+                            retryable=False,
+                            suggested_action="inspect_batch_id",
+                        )
+                    if batch.state in {"finished", "error", "interrupted"}:
+                        result = self._batch_result(store, batch)
+                        result["wait_timed_out"] = False
+                        return result
+                remaining = (
+                    None
+                    if deadline is None
+                    else max(0.0, deadline - time.monotonic())
+                )
+                if remaining == 0:
+                    timed_out = True
+                    break
+                try:
+                    await asyncio.wait_for(
+                        topic.condition.wait(),
+                        timeout=remaining,
+                    )
+                except TimeoutError:
+                    timed_out = True
+                    break
+        with DurableStore(paths=self.paths, profile=profile) as store:
+            batch = store.get_batch(batch_id)
+            if batch is None:
+                raise api_error(
+                    "BATCH_NOT_FOUND",
+                    f"Batch not found: {batch_id}",
+                    exit_code=ExitCode.NOT_FOUND,
+                    retryable=False,
+                    suggested_action="inspect_batch_id",
+                )
+            result = self._batch_result(store, batch)
+            result["wait_timed_out"] = timed_out
+            return result
+
+    def _cancel_batch(self, params: dict[str, Any]) -> dict[str, Any]:
+        profile = self._profile_from_params(params)
+        batch_id = self._batch_id(params)
+        assert self._coordinator is not None
+        batch = self._coordinator.cancel_batch(profile, batch_id)
+        with DurableStore(paths=self.paths, profile=profile) as store:
+            return self._batch_result(store, batch)
 
     @staticmethod
     def _session_name(params: dict[str, Any]) -> str:
@@ -783,6 +975,27 @@ class ControllerServer:
             result["traceback"] = json.loads(record.traceback_json)
         return result
 
+    def _batch_result(self, store: DurableStore, batch) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "batch_id": batch.batch_id,
+            "session": batch.session_name,
+            "state": batch.state,
+            "continue_on_error": batch.continue_on_error,
+            "executions": [
+                self._execution_result(
+                    store,
+                    self._require_execution(store, execution_id),
+                    include=[],
+                )
+                for execution_id in store.list_batch_members(batch.batch_id)
+            ],
+            "created_at": batch.created_at,
+            "updated_at": batch.updated_at,
+        }
+        if batch.completed_at is not None:
+            result["completed_at"] = batch.completed_at
+        return result
+
     def _output_page(
         self,
         store: DurableStore,
@@ -867,7 +1080,11 @@ class ControllerServer:
         topic = self._topic(self._batch_topic(profile, batch_id))
         with DurableStore(paths=self.paths, profile=profile) as store:
             batch = store.get_batch(batch_id)
-            payload = batch.to_wire() if batch is not None else None
+            payload = (
+                self._batch_result(store, batch)
+                if batch is not None
+                else None
+            )
         async with topic.condition:
             topic.revision += 1
             topic.payload = payload

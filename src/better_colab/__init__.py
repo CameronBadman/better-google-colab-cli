@@ -5,6 +5,9 @@ from better_colab.errors import BetterColabError, ExitCode
 from better_colab.models import (
     ArgumentSpec,
     Artifact,
+    BatchResult,
+    BatchState,
+    BatchWaitResult,
     CapabilitiesResult,
     CommandCapability,
     CompletionSource,
@@ -36,6 +39,9 @@ from better_colab.models import (
 __all__ = [
     "ArgumentSpec",
     "Artifact",
+    "BatchResult",
+    "BatchState",
+    "BatchWaitResult",
     "BetterColabClient",
     "BetterColabError",
     "CapabilitiesResult",

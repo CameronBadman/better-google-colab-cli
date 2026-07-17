@@ -12,6 +12,8 @@ from typing_extensions import Annotated
 from better_colab.durable_commands import _client_from_cli_state, execution_app
 from better_colab.errors import BetterColabError, ExitCode, api_error
 from better_colab.models import (
+    BatchResult,
+    BatchWaitResult,
     ExecutionListResult,
     ExecutionResult,
     ExecutionWaitResult,
@@ -34,12 +36,20 @@ def _result_exit_code(
 ) -> ExitCode:
     if isinstance(result, ExecutionWaitResult) and result.wait_timed_out:
         return ExitCode.WAIT_TIMEOUT
+    if isinstance(result, BatchWaitResult) and result.wait_timed_out:
+        return ExitCode.WAIT_TIMEOUT
     if attached and isinstance(result, ExecutionResult) and result.state.value in {
         "error",
         "interrupted",
         "timed_out",
         "unknown",
     }:
+        return ExitCode.EXECUTION_FAILED
+    if (
+        attached
+        and isinstance(result, BatchResult)
+        and result.state.value in {"error", "interrupted"}
+    ):
         return ExitCode.EXECUTION_FAILED
     return ExitCode.OK
 
@@ -103,6 +113,139 @@ def _render_output(result: OutputPage) -> None:
             stream.write(event.text)
     if result.next_cursor:
         typer.echo(f"Next cursor: {result.next_cursor}", err=True)
+
+
+batch_app = typer.Typer(
+    help="Create and inspect durable notebook-cell batches",
+    no_args_is_help=True,
+)
+execution_app.add_typer(batch_app, name="batch")
+
+
+def _render_batch(result: BatchResult) -> None:
+    typer.echo(f"{result.batch_id} {result.state.value}")
+    for execution in result.executions:
+        _render_execution(execution)
+
+
+@batch_app.command(name="start")
+def batch_start_command(
+    session: Annotated[
+        str,
+        typer.Option("--session", help="Existing session name"),
+    ],
+    notebook: Annotated[
+        Path,
+        typer.Option("--notebook", help="Local notebook path"),
+    ],
+    cell_id: Annotated[
+        Optional[list[str]],
+        typer.Option("--cell-id", help="Selected cell ID (repeatable)"),
+    ] = None,
+    cell_index: Annotated[
+        Optional[list[int]],
+        typer.Option("--cell-index", help="Selected cell index (repeatable)"),
+    ] = None,
+    continue_on_error: Annotated[
+        bool,
+        typer.Option(
+            "--continue-on-error",
+            help="Dispatch later cells after a child error",
+        ),
+    ] = False,
+    detach: Annotated[
+        bool,
+        typer.Option("--detach", help="Return after durable queueing"),
+    ] = False,
+    wait_timeout: Annotated[
+        Optional[float],
+        typer.Option("--wait-timeout", help="Bound only the caller's wait"),
+    ] = None,
+    output_format: Annotated[
+        str,
+        typer.Option("--format", help="Output format: text or json"),
+    ] = "text",
+) -> None:
+    """Queue selected notebook cells as one ordered durable batch."""
+
+    def operation() -> BatchResult | BatchWaitResult:
+        with _client_from_cli_state() as client:
+            return client.start_batch(
+                session=session,
+                notebook=notebook,
+                cell_ids=cell_id,
+                cell_indexes=cell_index,
+                continue_on_error=continue_on_error,
+                detach=detach,
+                wait_timeout=wait_timeout,
+            )
+
+    _format_operation(
+        output_format,
+        operation,
+        _render_batch,
+        attached=not detach,
+    )
+
+
+@batch_app.command(name="status")
+def batch_status_command(
+    batch_id: Annotated[str, typer.Argument(help="Batch UUID")],
+    output_format: Annotated[
+        str,
+        typer.Option("--format", help="Output format: text or json"),
+    ] = "text",
+) -> None:
+    """Observe one batch and its child executions."""
+
+    def operation() -> BatchResult:
+        with _client_from_cli_state() as client:
+            return client.batch_status(batch_id)
+
+    _format_operation(output_format, operation, _render_batch)
+
+
+@batch_app.command(name="wait")
+def batch_wait_command(
+    batch_id: Annotated[str, typer.Argument(help="Batch UUID")],
+    timeout: Annotated[
+        Optional[float],
+        typer.Option("--timeout", help="Caller wait timeout"),
+    ] = None,
+    output_format: Annotated[
+        str,
+        typer.Option("--format", help="Output format: text or json"),
+    ] = "text",
+) -> None:
+    """Wait for terminal batch state without polling."""
+
+    def operation() -> BatchWaitResult:
+        with _client_from_cli_state() as client:
+            return client.wait_batch(batch_id, timeout=timeout)
+
+    _format_operation(
+        output_format,
+        operation,
+        _render_batch,
+        attached=True,
+    )
+
+
+@batch_app.command(name="cancel")
+def batch_cancel_command(
+    batch_id: Annotated[str, typer.Argument(help="Batch UUID")],
+    output_format: Annotated[
+        str,
+        typer.Option("--format", help="Output format: text or json"),
+    ] = "text",
+) -> None:
+    """Cancel queued children and request interrupt of running work."""
+
+    def operation() -> BatchResult:
+        with _client_from_cli_state() as client:
+            return client.cancel_batch(batch_id)
+
+    _format_operation(output_format, operation, _render_batch)
 
 
 def _read_source(

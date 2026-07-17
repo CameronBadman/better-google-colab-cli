@@ -309,6 +309,70 @@ class ControllerClient:
         )
         return self.request("execution.start", params)
 
+    def start_batch(
+        self,
+        *,
+        profile: ProfileSpec,
+        batch_id: str,
+        session: str,
+        members: list[dict[str, Any]],
+        continue_on_error: bool,
+    ) -> dict[str, Any]:
+        self.ensure_running()
+        params = self._profile_params(profile)
+        params.update(
+            {
+                "batch_id": batch_id,
+                "session": session,
+                "members": members,
+                "continue_on_error": continue_on_error,
+            }
+        )
+        return self.request("execution.batch.start", params)
+
+    def batch_status(
+        self,
+        *,
+        profile: ProfileSpec,
+        batch_id: str,
+    ) -> dict[str, Any]:
+        self.ensure_running()
+        params = self._profile_params(profile)
+        params["batch_id"] = batch_id
+        return self.request("execution.batch.status", params)
+
+    def wait_batch(
+        self,
+        *,
+        profile: ProfileSpec,
+        batch_id: str,
+        timeout: float | None,
+    ) -> dict[str, Any]:
+        self.ensure_running()
+        params = self._profile_params(profile)
+        params.update({"batch_id": batch_id, "timeout": timeout})
+        socket_timeout = (
+            max(self.connect_timeout, timeout + 1)
+            if timeout is not None
+            else max(self.connect_timeout, 3601)
+        )
+        return self.request(
+            "execution.batch.wait",
+            params,
+            timeout=socket_timeout,
+        )
+
+    def cancel_batch(
+        self,
+        *,
+        profile: ProfileSpec,
+        batch_id: str,
+    ) -> dict[str, Any]:
+        self.ensure_running()
+        params = self._profile_params(profile)
+        params["batch_id"] = batch_id
+        return self.request("execution.batch.cancel", params)
+
     def execution_status(
         self,
         *,

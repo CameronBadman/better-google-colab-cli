@@ -86,7 +86,10 @@ COMMANDS: tuple[CommandCapability, ...] = (
     CommandCapability(
         name="execution batch cancel",
         summary="Request cancellation of a durable cell batch.",
-        arguments=[_arg("batch_id", "uuid", required=True)],
+        arguments=[
+            _arg("batch_id", "uuid", required=True),
+            _arg("format", "enum", default="text", choices=["text", "json"]),
+        ],
     ),
     CommandCapability(
         name="execution batch start",
@@ -100,12 +103,17 @@ COMMANDS: tuple[CommandCapability, ...] = (
             ),
             _arg("continue_on_error", "boolean", default=False),
             _arg("detach", "boolean", default=False),
+            _arg("wait_timeout", "seconds"),
+            _arg("format", "enum", default="text", choices=["text", "json"]),
         ],
     ),
     CommandCapability(
         name="execution batch status",
         summary="Observe batch and child execution states.",
-        arguments=[_arg("batch_id", "uuid", required=True)],
+        arguments=[
+            _arg("batch_id", "uuid", required=True),
+            _arg("format", "enum", default="text", choices=["text", "json"]),
+        ],
     ),
     CommandCapability(
         name="execution batch wait",
@@ -113,6 +121,7 @@ COMMANDS: tuple[CommandCapability, ...] = (
         arguments=[
             _arg("batch_id", "uuid", required=True),
             _arg("timeout", "seconds"),
+            _arg("format", "enum", default="text", choices=["text", "json"]),
         ],
     ),
     CommandCapability(

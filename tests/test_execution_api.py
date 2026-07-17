@@ -1,7 +1,14 @@
 
+import nbformat
 import pytest
 
-from better_colab import BetterColabClient, BetterColabError, ExecutionState
+from better_colab import (
+    BatchResult,
+    BatchWaitResult,
+    BetterColabClient,
+    BetterColabError,
+    ExecutionState,
+)
 from better_colab.models import (
     ExecutionListResult,
     ExecutionResult,
@@ -202,3 +209,88 @@ def test_session_status_and_probe_are_typed(mocker, client):
         name="training",
         timeout=3,
     )
+
+
+def test_typed_batch_snapshots_selected_cells_before_dispatch(
+    mocker,
+    client,
+    tmp_path,
+):
+    path = tmp_path / "batch.ipynb"
+    nbformat.write(
+        nbformat.v4.new_notebook(
+            cells=[
+                nbformat.v4.new_code_cell("first = 1", id="first"),
+                nbformat.v4.new_code_cell("second = 2", id="second"),
+            ]
+        ),
+        path,
+    )
+    controller = mocker.patch(
+        "better_colab.client.ControllerClient",
+    ).return_value
+
+    def started(**kwargs):
+        return {
+            "batch_id": kwargs["batch_id"],
+            "session": "training",
+            "state": "queued",
+            "continue_on_error": True,
+            "executions": [
+                {
+                    **_execution_wire(),
+                    "execution_id": member["execution_id"],
+                    "source_sha256": __import__("hashlib").sha256(
+                        member["source"].encode()
+                    ).hexdigest(),
+                }
+                for member in kwargs["members"]
+            ],
+            "created_at": "2026-07-17T00:00:00Z",
+            "updated_at": "2026-07-17T00:00:00Z",
+        }
+
+    controller.start_batch.side_effect = started
+
+    result = client.start_batch(
+        session="training",
+        notebook=path,
+        cell_ids=["second", "first"],
+        continue_on_error=True,
+        detach=True,
+    )
+
+    assert isinstance(result, BatchResult)
+    members = controller.start_batch.call_args.kwargs["members"]
+    assert [item["source"] for item in members] == ["second = 2", "first = 1"]
+    assert [item["provenance"]["cell_id"] for item in members] == [
+        "second",
+        "first",
+    ]
+    assert len({item["execution_id"] for item in members}) == 2
+
+
+def test_batch_status_wait_and_cancel_are_typed(mocker, client):
+    controller = mocker.patch(
+        "better_colab.client.ControllerClient",
+    ).return_value
+    batch = {
+        "batch_id": "10000000-0000-4000-8000-000000000901",
+        "session": "training",
+        "state": "finished",
+        "continue_on_error": False,
+        "executions": [_execution_wire("finished")],
+        "created_at": "2026-07-17T00:00:00Z",
+        "updated_at": "2026-07-17T00:00:01Z",
+    }
+    controller.batch_status.return_value = batch
+    controller.wait_batch.return_value = {**batch, "wait_timed_out": False}
+    controller.cancel_batch.return_value = batch
+
+    status = client.batch_status(batch["batch_id"])
+    waited = client.wait_batch(batch["batch_id"])
+    cancelled = client.cancel_batch(batch["batch_id"])
+
+    assert isinstance(status, BatchResult)
+    assert isinstance(waited, BatchWaitResult)
+    assert isinstance(cancelled, BatchResult)

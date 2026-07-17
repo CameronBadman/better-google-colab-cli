@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from better_colab import ExecutionState
+from better_colab import BetterColabError, ExecutionState
 from better_colab.controller import ControllerServer
 from better_colab.execution import ExecutionCoordinator
 from better_colab.kernel_transport import KernelEvent, PreparedExecution
@@ -298,3 +298,42 @@ def test_controller_restart_resumes_batch_policy_instead_of_children(
     assert store.list_transitions(second.execution_id)[-1].reason == "batch_stopped"
     assert store.get_batch(batch.batch_id).state == "error"
     assert transport.sent_sources == ["raise ValueError('bad')"]
+
+
+def test_batch_creation_conflict_rolls_back_new_source_spools(store):
+    existing = _child(
+        store,
+        "00000000-0000-4000-8000-000000000821",
+        "existing = True",
+    )
+    original_source = store.read_execution_source(existing.execution_id)
+    before_paths = set(store.paths.sources_dir.iterdir())
+
+    with pytest.raises(BetterColabError) as error:
+        store.create_batch_executions(
+            batch_id="10000000-0000-4000-8000-000000000802",
+            session_name="training",
+            continue_on_error=False,
+            members=[
+                {
+                    "execution_id": existing.execution_id,
+                    "source": b"replacement = False",
+                    "provenance": {"kind": "notebook_cell"},
+                    "request": {"source_sha256": "replacement"},
+                },
+                {
+                    "execution_id": "00000000-0000-4000-8000-000000000822",
+                    "source": b"new = True",
+                    "provenance": {"kind": "notebook_cell"},
+                    "request": {"source_sha256": "new"},
+                },
+            ],
+        )
+
+    assert error.value.error.code == "EXECUTION_ID_CONFLICT"
+    assert store.get_batch("10000000-0000-4000-8000-000000000802") is None
+    assert store.get_execution(
+        "00000000-0000-4000-8000-000000000822"
+    ) is None
+    assert store.read_execution_source(existing.execution_id) == original_source
+    assert set(store.paths.sources_dir.iterdir()) == before_paths

@@ -333,3 +333,27 @@ def test_mutations_reject_duplicate_or_missing_ids_outside_explicit_assignment(
 
     assert duplicate_error.value.error.code == "DUPLICATE_CELL_ID"
     assert missing_error.value.error.code == "MISSING_CELL_IDS"
+
+
+def test_batch_cell_selection_uses_one_snapshot_and_preserves_order(tmp_path):
+    path = _write_notebook(
+        tmp_path / "batch.ipynb",
+        [
+            nbformat.v4.new_code_cell("first = 1", id="first"),
+            nbformat.v4.new_code_cell("second = 2", id="second"),
+        ],
+    )
+    document = NotebookDocument(path)
+
+    by_id = document.execution_cells(cell_ids=["second", "first"])
+    by_index = document.execution_cells(indexes=[0, 1])
+
+    assert [cell.cell_id for cell in by_id] == ["second", "first"]
+    assert [cell.source for cell in by_index] == ["first = 1", "second = 2"]
+
+    with pytest.raises(BetterColabError) as duplicate:
+        document.execution_cells(cell_ids=["first", "first"])
+    with pytest.raises(BetterColabError) as conflict:
+        document.execution_cells(cell_ids=["first"], indexes=[0])
+    assert duplicate.value.error.code == "DUPLICATE_CELL_SELECTION"
+    assert conflict.value.error.code == "CONFLICTING_CELL_SELECTOR"

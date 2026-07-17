@@ -14,6 +14,8 @@ from better_colab.capabilities import get_capabilities
 from better_colab.controller_client import ControllerClient
 from better_colab.errors import BetterColabError, ExitCode, api_error
 from better_colab.models import (
+    BatchResult,
+    BatchWaitResult,
     CapabilitiesResult,
     ControllerStatus,
     ControllerStopResult,
@@ -302,6 +304,83 @@ class BetterColabClient:
             limit=limit,
         )
         return ExecutionListResult.model_validate(result)
+
+    def start_batch(
+        self,
+        *,
+        session: str,
+        notebook: str | os.PathLike[str],
+        cell_ids: list[str] | None = None,
+        cell_indexes: list[int] | None = None,
+        continue_on_error: bool = False,
+        detach: bool = False,
+        wait_timeout: float | None = None,
+    ) -> BatchResult | BatchWaitResult:
+        if detach and wait_timeout is not None:
+            raise api_error(
+                "CONFLICTING_FLAGS",
+                "detach and wait_timeout are mutually exclusive",
+                exit_code=ExitCode.USAGE,
+                retryable=False,
+                suggested_action="choose_detach_or_wait_timeout",
+            )
+        cells = NotebookDocument(notebook).execution_cells(
+            cell_ids=cell_ids,
+            indexes=cell_indexes,
+        )
+        members = [
+            {
+                "execution_id": str(uuid.uuid4()),
+                "source": cell.source,
+                "provenance": {
+                    "kind": "notebook_cell",
+                    "path": cell.path,
+                    "notebook_id": cell.notebook_id,
+                    "cell_id": cell.cell_id,
+                    "cell_index": cell.index,
+                },
+            }
+            for cell in cells
+        ]
+        batch_id = str(uuid.uuid4())
+        result = ControllerClient(paths=self.paths).start_batch(
+            profile=self.profile,
+            batch_id=batch_id,
+            session=session,
+            members=members,
+            continue_on_error=continue_on_error,
+        )
+        started = BatchResult.model_validate(result)
+        if detach:
+            return started
+        return self.wait_batch(started.batch_id, timeout=wait_timeout)
+
+    def batch_status(self, batch_id: str) -> BatchResult:
+        result = ControllerClient(paths=self.paths).batch_status(
+            profile=self.profile,
+            batch_id=batch_id,
+        )
+        return BatchResult.model_validate(result)
+
+    def wait_batch(
+        self,
+        batch_id: str,
+        *,
+        timeout: float | None = None,
+    ) -> BatchWaitResult:
+        result = ControllerClient(paths=self.paths).wait_batch(
+            profile=self.profile,
+            batch_id=batch_id,
+            timeout=timeout,
+        )
+        return BatchWaitResult.model_validate(result)
+
+    def cancel_batch(self, batch_id: str) -> BatchResult:
+        result = ControllerClient(paths=self.paths).cancel_batch(
+            profile=self.profile,
+            batch_id=batch_id,
+        )
+        return BatchResult.model_validate(result)
 
     def notebook_cells(
         self,

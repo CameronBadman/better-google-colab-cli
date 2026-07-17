@@ -2539,6 +2539,172 @@ class DurableStore:
             )
         return self.get_batch(batch_id)
 
+    def create_batch_executions(
+        self,
+        *,
+        batch_id: str,
+        session_name: str,
+        members: Sequence[dict[str, Any]],
+        continue_on_error: bool,
+    ) -> BatchRecord:
+        if not members:
+            raise api_error(
+                "BATCH_MEMBERS_REQUIRED",
+                "A batch requires at least one execution",
+                exit_code=ExitCode.USAGE,
+                retryable=False,
+                suggested_action="select_notebook_cells",
+            )
+        execution_ids = [str(member["execution_id"]) for member in members]
+        if len(set(execution_ids)) != len(execution_ids):
+            raise api_error(
+                "DUPLICATE_BATCH_MEMBER",
+                "Each execution may appear only once in a batch",
+                exit_code=ExitCode.CONFLICT,
+                retryable=False,
+                suggested_action="deduplicate_batch_members",
+            )
+        source_paths: dict[str, Path] = {}
+        try:
+            for member in members:
+                execution_id = str(member["execution_id"])
+                source = member["source"]
+                if not isinstance(source, bytes):
+                    raise TypeError("batch source must be bytes")
+                source_paths[execution_id] = self._atomic_write(
+                    self.paths.sources_dir,
+                    f"{execution_id}.{uuid.uuid4().hex}.source",
+                    source,
+                )
+            with self.transaction() as connection:
+                session = connection.execute(
+                    """
+                    SELECT endpoint, kernel_id, jupyter_session_id
+                    FROM sessions WHERE profile_id = ? AND name = ?
+                    """,
+                    (self.profile.profile_id, session_name),
+                ).fetchone()
+                if session is None:
+                    raise api_error(
+                        "SESSION_NOT_FOUND",
+                        f"Session not found: {session_name}",
+                        exit_code=ExitCode.NOT_FOUND,
+                        retryable=False,
+                        suggested_action="ensure_session",
+                    )
+                if connection.execute(
+                    "SELECT 1 FROM execution_batches WHERE batch_id = ?",
+                    (batch_id,),
+                ).fetchone():
+                    raise api_error(
+                        "BATCH_ID_CONFLICT",
+                        f"Batch already exists: {batch_id}",
+                        exit_code=ExitCode.CONFLICT,
+                        retryable=False,
+                        suggested_action="generate_a_new_batch_id",
+                    )
+                existing = connection.execute(
+                    f"""
+                    SELECT execution_id FROM executions
+                    WHERE execution_id IN ({",".join("?" for _ in execution_ids)})
+                    """,
+                    execution_ids,
+                ).fetchone()
+                if existing is not None:
+                    raise api_error(
+                        "EXECUTION_ID_CONFLICT",
+                        f"Execution already exists: {existing['execution_id']}",
+                        exit_code=ExitCode.CONFLICT,
+                        retryable=False,
+                        suggested_action="generate_new_execution_ids",
+                    )
+                now = self._time()
+                connection.execute(
+                    """
+                    INSERT INTO execution_batches (
+                        batch_id, profile_id, session_name, state,
+                        continue_on_error, created_at, updated_at
+                    ) VALUES (?, ?, ?, 'queued', ?, ?, ?)
+                    """,
+                    (
+                        batch_id,
+                        self.profile.profile_id,
+                        session_name,
+                        int(continue_on_error),
+                        now,
+                        now,
+                    ),
+                )
+                for position, member in enumerate(members):
+                    execution_id = execution_ids[position]
+                    source = member["source"]
+                    provenance = member["provenance"]
+                    request = member["request"]
+                    connection.execute(
+                        """
+                        INSERT INTO executions (
+                            execution_id, profile_id, session_name,
+                            session_endpoint, kernel_id_snapshot,
+                            jupyter_session_id_snapshot, request_hash,
+                            source_kind, source_path, notebook_id, cell_id,
+                            cell_index, source_sha256, source_spool_path,
+                            state, created_at, queued_at, updated_at
+                        ) VALUES (
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                        )
+                        """,
+                        (
+                            execution_id,
+                            self.profile.profile_id,
+                            session_name,
+                            session["endpoint"],
+                            session["kernel_id"],
+                            session["jupyter_session_id"],
+                            self._request_hash(request),
+                            str(provenance.get("kind") or "notebook_cell"),
+                            provenance.get("path"),
+                            provenance.get("notebook_id"),
+                            provenance.get("cell_id"),
+                            provenance.get("cell_index"),
+                            self.sha256(source),
+                            str(source_paths[execution_id]),
+                            ExecutionState.QUEUED.value,
+                            now,
+                            now,
+                            now,
+                        ),
+                    )
+                    self._insert_transition(
+                        connection,
+                        execution_id,
+                        None,
+                        ExecutionState.CREATED,
+                        reason="created",
+                        created_at=now,
+                    )
+                    self._insert_transition(
+                        connection,
+                        execution_id,
+                        ExecutionState.CREATED,
+                        ExecutionState.QUEUED,
+                        reason="source_durably_queued",
+                        created_at=now,
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO batch_members (
+                            batch_id, position, execution_id
+                        ) VALUES (?, ?, ?)
+                        """,
+                        (batch_id, position, execution_id),
+                    )
+        except BaseException:
+            for path in source_paths.values():
+                with contextlib.suppress(OSError):
+                    path.unlink()
+            raise
+        return self.get_batch(batch_id)
+
     def get_batch(self, batch_id: str) -> BatchRecord | None:
         row = self.connection.execute(
             """

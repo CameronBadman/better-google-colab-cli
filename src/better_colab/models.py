@@ -54,6 +54,15 @@ class CompletionSource(str, Enum):
     DURABLE_EVIDENCE = "durable_evidence"
 
 
+class BatchState(str, Enum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    CANCELLING = "cancelling"
+    FINISHED = "finished"
+    ERROR = "error"
+    INTERRUPTED = "interrupted"
+
+
 class HealthResult(PublicModel):
     """The seven health fields that are never omitted from wire output."""
 
@@ -229,6 +238,21 @@ class ExecutionWaitResult(ExecutionResult):
 class ExecutionListResult(PublicModel):
     executions: list[ExecutionResult]
     next_cursor: str | None = None
+
+
+class BatchResult(PublicModel):
+    batch_id: str
+    session: str
+    state: BatchState
+    continue_on_error: bool
+    executions: list[ExecutionResult]
+    created_at: str
+    updated_at: str
+    completed_at: str | None = None
+
+
+class BatchWaitResult(BatchResult):
+    wait_timed_out: bool = False
 
 
 class NotebookCellSummary(PublicModel):

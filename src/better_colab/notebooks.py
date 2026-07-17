@@ -337,6 +337,79 @@ class NotebookDocument:
         selected_id = notebook.cells[selected_index]["id"]
         return self.cell(cell_id=selected_id)
 
+    def execution_cells(
+        self,
+        *,
+        cell_ids: list[str] | None = None,
+        indexes: list[int] | None = None,
+    ) -> list[NotebookCell]:
+        if cell_ids and indexes:
+            raise api_error(
+                "CONFLICTING_CELL_SELECTOR",
+                "cell IDs and indexes are mutually exclusive",
+                exit_code=ExitCode.USAGE,
+                retryable=False,
+                suggested_action="choose_one_cell_selector",
+            )
+        selectors: list[str | int]
+        by_id = bool(cell_ids)
+        if cell_ids:
+            selectors = list(cell_ids)
+        elif indexes:
+            selectors = list(indexes)
+        else:
+            raise api_error(
+                "CELL_SELECTOR_REQUIRED",
+                "At least one cell ID or index is required",
+                exit_code=ExitCode.USAGE,
+                retryable=False,
+                suggested_action="specify_batch_cells",
+            )
+        if len(set(selectors)) != len(selectors):
+            raise api_error(
+                "DUPLICATE_CELL_SELECTION",
+                "Each notebook cell may appear only once in a batch",
+                exit_code=ExitCode.CONFLICT,
+                retryable=False,
+                suggested_action="deduplicate_cell_selection",
+            )
+        notebook, notebook_sha256 = self._snapshot()
+        self._require_unique_ids(notebook)
+        selected: list[NotebookCell] = []
+        for selector in selectors:
+            selected_index = self._select_index(
+                notebook,
+                cell_id=str(selector) if by_id else None,
+                index=None if by_id else int(selector),
+            )
+            cell = notebook.cells[selected_index]
+            summary = self._summary(cell, selected_index)
+            if summary.cell_type != "code":
+                raise api_error(
+                    "CELL_NOT_CODE",
+                    "Only code cells can be executed in a batch",
+                    exit_code=ExitCode.USAGE,
+                    retryable=False,
+                    suggested_action="select_code_cells",
+                )
+            if summary.cell_id is None:
+                raise api_error(
+                    "CELL_ID_REQUIRED",
+                    "Assign notebook cell IDs before durable batch execution",
+                    exit_code=ExitCode.CONFLICT,
+                    retryable=False,
+                    suggested_action="assign_notebook_ids",
+                )
+            selected.append(
+                NotebookCell(
+                    **summary.model_dump(),
+                    path=str(self.path),
+                    notebook_sha256=notebook_sha256,
+                    source=str(cell.get("source", "")),
+                )
+            )
+        return selected
+
     def assign_ids(
         self,
         *,
