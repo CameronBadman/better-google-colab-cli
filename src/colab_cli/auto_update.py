@@ -12,14 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Auto-update subsystem.
+"""Explicit update subsystem.
 
 Owns version detection, the PyPI-style update probe, the on-disk
-``latest_version`` cache, and the upgrade-banner UX. The CLI's global
-callback (``cli.py``) calls ``check_for_updates`` once per day and
-``maybe_show_cached_banner`` on every other invocation; the
-``colab update`` Typer command (``commands/utility.py``) delegates to
-``check_for_updates``.
+``latest_version`` cache, and the update-command UX. No CLI callback calls
+this module: network access and update output happen only after an explicit
+``update`` command.
 """
 
 import json
@@ -37,7 +35,7 @@ from colab_cli.common import state
 from colab_cli.state import Settings
 
 # PyPI distribution name (different from the importable package name `colab`).
-PYPI_PACKAGE_NAME = "google-colab-cli"
+PYPI_PACKAGE_NAME = "better-google-colab-cli"
 
 
 # ---------- Version detection -------------------------------------------
@@ -51,7 +49,7 @@ def is_self_install_supported() -> bool:
 def get_app_version() -> str:
     """Return the installed package version, falling back to the git short hash."""
     try:
-        return installed_version("google-colab-cli")
+        return installed_version(PYPI_PACKAGE_NAME)
     except (PackageNotFoundError, InvalidVersion):
         pass
 
@@ -213,19 +211,12 @@ def maybe_show_cached_banner(settings: Settings) -> None:
 
 
 def run_background_check() -> None:
-    """Entry point for the global CLI callback.
+    """Deprecated no-op retained for import compatibility.
 
-    Performs either the daily fetch (which writes the cache) or, if
-    throttled, surfaces the cached banner. Honors the
-    ``enable_update_check`` master switch.
+    Better Colab never performs implicit update checks or emits unsolicited
+    update banners.
     """
-    settings = state.settings_store.load()
-    if not settings.enable_update_check:
-        return
-    if _is_throttled(settings):
-        maybe_show_cached_banner(settings)
-    else:
-        check_for_updates(quiet=True)
+    return None
 
 
 # ---------- Self-install ------------------------------------------------

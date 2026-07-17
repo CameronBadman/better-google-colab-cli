@@ -349,7 +349,7 @@ def update_command(
         typer.Option(
             "--install",
             help=(
-                "After checking, run 'pip install -U google-colab-cli' to "
+                "After checking, run 'pip install -U better-google-colab-cli' to "
                 "upgrade the CLI in place. No-op if already up to date. "
                 "Linux only."
             ),
@@ -421,7 +421,7 @@ def skill():
     _print_resource("SKILL.md")
 
 
-def register(app: typer.Typer):
+def register(app: typer.Typer, *, include_legacy_skill: bool = True):
     app.command()(pay)
     app.command()(log)
     app.command(name="url")(url)
@@ -432,5 +432,6 @@ def register(app: typer.Typer):
     app.command(name="whoami", hidden=True)(whoami)
     app.command(name="readme")(readme)
     app.command(name="README", hidden=True)(readme)
-    app.command(name="skill")(skill)
-    app.command(name="SKILL", hidden=True)(skill)
+    if include_legacy_skill:
+        app.command(name="skill")(skill)
+        app.command(name="SKILL", hidden=True)(skill)

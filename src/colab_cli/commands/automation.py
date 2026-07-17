@@ -264,7 +264,8 @@ install()
     run_automation(name, "install", code)
 
 
-def register(app: typer.Typer):
+def register(app: typer.Typer, *, include_drive: bool = True):
     app.command(hidden=True)(auth)
-    app.command()(drivemount)
+    if include_drive:
+        app.command()(drivemount)
     app.command()(install)

@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from typer.testing import CliRunner
 
+from colab_cli import auto_update
 from colab_cli.cli import app
 from colab_cli.state import Settings
 
@@ -130,13 +131,16 @@ def test_pypi_upgrade_uses_pip_hint(mocker, app_version, fake_settings, mock_pyp
     assert result.exit_code == 0
     assert "available: 1.1.0 (current: 1.0.0)" in result.output
     assert "You can run 'colab update --install' to upgrade in place." in result.output
-    assert "Run 'pip install --upgrade google-colab-cli' to update." in result.output
+    assert (
+        "Run 'pip install --upgrade better-google-colab-cli' to update."
+        in result.output
+    )
 
     idx_install = result.output.find(
         "You can run 'colab update --install' to upgrade in place."
     )
     idx_pip = result.output.find(
-        "Run 'pip install --upgrade google-colab-cli' to update."
+        "Run 'pip install --upgrade better-google-colab-cli' to update."
     )
     assert idx_install < idx_pip
 
@@ -146,7 +150,8 @@ def test_pypi_upgrade_uses_uv_hint(mocker, app_version, fake_settings, mock_pypi
     mock_pypi({"info": {"version": "1.1.0"}})
     fake_settings()
     mocker.patch(
-        "sys.executable", "/home/user/.local/share/uv/tools/google-colab-cli/bin/python"
+        "sys.executable",
+        "/home/user/.local/share/uv/tools/better-google-colab-cli/bin/python",
     )
     mocker.patch("colab_cli.auto_update.platform.system", return_value="Linux")
 
@@ -154,12 +159,17 @@ def test_pypi_upgrade_uses_uv_hint(mocker, app_version, fake_settings, mock_pypi
     assert result.exit_code == 0
     assert "available: 1.1.0 (current: 1.0.0)" in result.output
     assert "You can run 'colab update --install' to upgrade in place." in result.output
-    assert "Run 'uv tool install -U google-colab-cli' to update." in result.output
+    assert (
+        "Run 'uv tool install -U better-google-colab-cli' to update."
+        in result.output
+    )
 
     idx_install = result.output.find(
         "You can run 'colab update --install' to upgrade in place."
     )
-    idx_uv = result.output.find("Run 'uv tool install -U google-colab-cli' to update.")
+    idx_uv = result.output.find(
+        "Run 'uv tool install -U better-google-colab-cli' to update."
+    )
     assert idx_install < idx_uv
 
 
@@ -176,13 +186,16 @@ def test_pypi_upgrade_uses_pip_hint_macos(
     assert result.exit_code == 0
     assert "available: 1.1.0 (current: 1.0.0)" in result.output
     assert "You can run 'colab update --install' to upgrade in place." in result.output
-    assert "Run 'pip install --upgrade google-colab-cli' to update." in result.output
+    assert (
+        "Run 'pip install --upgrade better-google-colab-cli' to update."
+        in result.output
+    )
 
     idx_install = result.output.find(
         "You can run 'colab update --install' to upgrade in place."
     )
     idx_pip = result.output.find(
-        "Run 'pip install --upgrade google-colab-cli' to update."
+        "Run 'pip install --upgrade better-google-colab-cli' to update."
     )
     assert idx_install < idx_pip
 
@@ -202,7 +215,10 @@ def test_pypi_upgrade_uses_pip_hint_windows(
     assert (
         "You can run 'colab update --install' to upgrade in place." not in result.output
     )
-    assert "Run 'pip install --upgrade google-colab-cli' to update." in result.output
+    assert (
+        "Run 'pip install --upgrade better-google-colab-cli' to update."
+        in result.output
+    )
 
 
 def test_explicit_update_omits_disable_hint(app_version, fake_settings, mock_pypi):
@@ -219,22 +235,25 @@ def test_explicit_update_omits_disable_hint(app_version, fake_settings, mock_pyp
     assert "enable_update_check" not in result.output
 
 
-def test_background_check_includes_disable_hint(app_version, fake_settings, mock_pypi):
-    """The daily background fetch (triggered by any non-quiet command)
-    DOES include the 'how to silence' line so users have an obvious opt-out."""
+def test_non_update_command_never_runs_background_check(
+    mocker, app_version, fake_settings, mock_pypi
+):
+    """Update checks are explicit; ordinary commands never touch the network."""
     app_version("1.0.0")
     mock_pypi({"info": {"version": "1.1.0"}})
     fake_settings(last_check=datetime.now(timezone.utc) - timedelta(days=2))
+    check = mocker.spy(auto_update, "check_for_updates")
 
     result = runner.invoke(app, ["sessions"])
     assert result.exit_code == 0
-    assert "available: 1.1.0" in result.output
-    assert "To silence this check" in result.output
-    assert '"enable_update_check": false' in result.output
+    assert check.call_count == 0
+    assert "available: 1.1.0" not in result.output
 
 
-def test_cached_banner_includes_disable_hint(mocker, app_version, fake_settings):
-    """The cached banner shown between fetches is unsolicited; include the hint."""
+def test_non_update_command_never_shows_cached_banner(
+    mocker, app_version, fake_settings
+):
+    """Cached update state must not pollute command output."""
     app_version("1.0.0")
     fake_settings(
         last_check=datetime.now(timezone.utc) - timedelta(hours=1),
@@ -244,8 +263,8 @@ def test_cached_banner_includes_disable_hint(mocker, app_version, fake_settings)
 
     result = runner.invoke(app, ["sessions"])
     assert result.exit_code == 0
-    assert "available: 1.2.0" in result.output
-    assert "To silence this check" in result.output
+    assert "available: 1.2.0" not in result.output
+    assert "To silence this check" not in result.output
 
 
 # ---------- Resilience --------------------------------------------------
@@ -265,14 +284,18 @@ def test_pypi_fetch_failure_omits_latest(app_version, fake_settings, mock_pypi):
 # ---------- Auto-update wiring ------------------------------------------
 
 
-def test_auto_update_runs_when_stale(app_version, fake_settings, mock_pypi):
+def test_auto_update_does_not_run_when_stale(
+    mocker, app_version, fake_settings, mock_pypi
+):
     app_version("1.0.0")
     mock_pypi({"info": {"version": "1.1.0"}})
     fake_settings(last_check=datetime.now(timezone.utc) - timedelta(days=2))
+    check = mocker.spy(auto_update, "check_for_updates")
 
     result = runner.invoke(app, ["sessions"])
     assert result.exit_code == 0
-    assert "available: 1.1.0 (current: 1.0.0)" in result.output
+    assert check.call_count == 0
+    assert "available: 1.1.0 (current: 1.0.0)" not in result.output
 
 
 def test_auto_update_skips_when_recent(mocker, fake_settings):
@@ -283,14 +306,16 @@ def test_auto_update_skips_when_recent(mocker, fake_settings):
     assert mock_check.call_count == 0
 
 
-def test_auto_update_runs_on_first_invocation(mocker, app_version, fake_settings):
+def test_auto_update_does_not_run_on_first_invocation(
+    mocker, app_version, fake_settings
+):
     app_version("1.0.0")
     fake_settings()  # last_check=None
     mock_check = mocker.patch("colab_cli.auto_update.check_for_updates")
 
     result = runner.invoke(app, ["sessions"])
     assert result.exit_code == 0
-    assert mock_check.call_count == 1
+    assert mock_check.call_count == 0
 
 
 # ---------- `latest_version` cache --------------------------------------
@@ -337,9 +362,10 @@ def test_check_does_not_downgrade_latest_version(app_version, fake_settings, moc
 # ---------- Cached banner on every invocation ---------------------------
 
 
-def test_cached_banner_shown_when_throttled(mocker, app_version, fake_settings):
-    """When the daily fetch is skipped, a cached newer `latest_version` still
-    triggers the upgrade banner — without re-fetching."""
+def test_cached_banner_not_shown_when_throttled(
+    mocker, app_version, fake_settings
+):
+    """Cached versions are observed only by the explicit update command."""
     app_version("1.0.0")
     fake_settings(
         last_check=datetime.now(timezone.utc) - timedelta(hours=1),
@@ -350,7 +376,7 @@ def test_cached_banner_shown_when_throttled(mocker, app_version, fake_settings):
     result = runner.invoke(app, ["sessions"])
     assert result.exit_code == 0
     assert mock_check.call_count == 0  # throttle still active
-    assert "available: 1.2.0 (current: 1.0.0)" in result.output
+    assert "available: 1.2.0 (current: 1.0.0)" not in result.output
 
 
 def test_cached_banner_suppressed_when_up_to_date(mocker, app_version, fake_settings):
@@ -467,7 +493,7 @@ def test_install_flag_default_does_not_install(
 def test_install_flag_runs_pip_install_upgrade(
     mocker, app_version, fake_settings, mock_pypi
 ):
-    """`colab update --install` shells out to `pip install -U google-colab-cli`
+    """`colab update --install` upgrades the Better Colab core distribution
     when PyPI reports a newer version."""
     app_version("1.0.0")
     mock_pypi({"info": {"version": "1.1.0"}})
@@ -485,20 +511,28 @@ def test_install_flag_runs_pip_install_upgrade(
     args, _ = run.call_args
     # Use sys.executable to avoid PATH ambiguity / virtualenv mixups.
     cmd = args[0]
-    assert cmd == ["/usr/bin/python", "-m", "pip", "install", "-U", "google-colab-cli"]
+    assert cmd == [
+        "/usr/bin/python",
+        "-m",
+        "pip",
+        "install",
+        "-U",
+        "better-google-colab-cli",
+    ]
 
 
 def test_install_flag_runs_uv_tool_install(
     mocker, app_version, fake_settings, mock_pypi
 ):
-    """`colab update --install` shells out to `uv tool install -U google-colab-cli`
+    """`colab update --install` upgrades the Better Colab core uv tool
     when sys.executable contains '/uv/'."""
     app_version("1.0.0")
     mock_pypi({"info": {"version": "1.1.0"}})
     fake_settings()
     mocker.patch("colab_cli.auto_update.platform.system", return_value="Linux")
     mocker.patch(
-        "sys.executable", "/home/user/.local/share/uv/tools/google-colab-cli/bin/python"
+        "sys.executable",
+        "/home/user/.local/share/uv/tools/better-google-colab-cli/bin/python",
     )
     run = mocker.patch(
         "colab_cli.auto_update.subprocess.run",
@@ -510,7 +544,13 @@ def test_install_flag_runs_uv_tool_install(
     assert run.call_count == 1
     args, _ = run.call_args
     cmd = args[0]
-    assert cmd == ["uv", "tool", "install", "-U", "google-colab-cli"]
+    assert cmd == [
+        "uv",
+        "tool",
+        "install",
+        "-U",
+        "better-google-colab-cli",
+    ]
 
 
 def test_install_flag_errors_on_unsupported_platform(
@@ -547,7 +587,14 @@ def test_install_flag_runs_on_macos(mocker, app_version, fake_settings, mock_pyp
     assert run.call_count == 1
     args, _ = run.call_args
     cmd = args[0]
-    assert cmd == ["/usr/bin/python", "-m", "pip", "install", "-U", "google-colab-cli"]
+    assert cmd == [
+        "/usr/bin/python",
+        "-m",
+        "pip",
+        "install",
+        "-U",
+        "better-google-colab-cli",
+    ]
 
 
 def test_install_flag_no_op_when_already_up_to_date(

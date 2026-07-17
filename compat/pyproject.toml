@@ -1,0 +1,26 @@
+[project]
+name = "better-google-colab-cli-compat"
+dynamic = ["dependencies", "version"]
+description = "Optional colab executable compatibility shim for Better Colab."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Google LLC" }]
+
+[project.scripts]
+colab = "colab_cli.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/CameronBadman/better-google-colab-cli"
+Repository = "https://github.com/CameronBadman/better-google-colab-cli"
+Upstream = "https://github.com/googlecolab/google-colab-cli"
+
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata.hooks.custom]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/better_colab_compat"]
