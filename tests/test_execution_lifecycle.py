@@ -343,13 +343,27 @@ def test_confirmed_disconnect_is_disconnected_and_output_incomplete(
 
     transport = _Disconnect(store=store, profile=profile, events=[first])
     transport.execution_id = execution.execution_id
+    factory_calls = 0
+
+    def factory(_session):
+        nonlocal factory_calls
+        factory_calls += 1
+        if factory_calls == 1:
+            return transport
+        raise ConnectionError("reconnect unavailable")
+
     coordinator = ExecutionCoordinator(
         paths=paths,
-        transport_factory=lambda _session: transport,
+        transport_factory=factory,
     )
 
     coordinator.submit(profile, execution.execution_id)
-    coordinator.wait_idle(timeout=2)
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        record = store.get_execution(execution.execution_id)
+        if record.state is ExecutionState.DISCONNECTED:
+            break
+        time.sleep(0.01)
 
     record = store.get_execution(execution.execution_id)
     events = store.list_output_events(execution.execution_id)

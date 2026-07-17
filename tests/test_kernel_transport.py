@@ -141,6 +141,21 @@ def test_adapter_prepares_no_history_nonce_request():
     }
 
 
+def test_adapter_prepares_kernel_info_boundary_request():
+    private = _PrivateClient()
+    adapter = KernelTransportAdapter.from_connected_client(
+        _KernelClient(private),
+        kernel_id="kernel-1",
+        jupyter_session_id="jupyter-1",
+    )
+
+    prepared = adapter.prepare_kernel_info()
+
+    assert prepared.message_id == prepared.message["header"]["msg_id"]
+    assert prepared.message["msg_type"] == "kernel_info_request"
+    assert prepared.message["content"] == {}
+
+
 def test_adapter_is_the_single_reader_for_shell_and_iopub():
     private = _PrivateClient()
     adapter = KernelTransportAdapter.from_connected_client(

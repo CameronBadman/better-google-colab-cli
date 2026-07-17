@@ -115,7 +115,7 @@ class ControllerServer:
         )
         self.paths.socket.chmod(0o600)
         self._write_pid()
-        self._resume_queued()
+        self._reconcile_and_resume()
 
     def _write_pid(self) -> None:
         descriptor = os.open(
@@ -841,11 +841,15 @@ class ControllerServer:
             topic.payload = payload
             topic.condition.notify_all()
 
-    def _resume_queued(self) -> None:
+    def _reconcile_and_resume(self) -> None:
         assert self._coordinator is not None
         for profile in self._profile_specs():
             with DurableStore(paths=self.paths, profile=profile) as store:
+                store.invalidate_kernel_connections()
+                recovery_ids = store.reconcile_after_restart()
                 queued = store.list_queued_executions()
+            for execution_id in recovery_ids:
+                self._coordinator.recover(profile, execution_id)
             for record in queued:
                 self._coordinator.submit(profile, record.execution_id)
 

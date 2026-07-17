@@ -77,6 +77,35 @@ class ExecutionProof:
         if self._requested_terminal != "timed_out":
             self._requested_terminal = terminal_state
 
+    def restore(
+        self,
+        *,
+        dispatch_confirmed: bool,
+        reply_received: bool,
+        idle_received: bool,
+        reply_status: str | None,
+        error_name: str | None,
+        error_value: str | None,
+        traceback: list[str] | None,
+        requested_terminal: str | None,
+    ) -> None:
+        """Restore only evidence that was committed before reconnecting."""
+        if reply_status not in {None, "ok", "error", "aborted"}:
+            raise ValueError("invalid durable execute reply status")
+        self.dispatch_confirmed = dispatch_confirmed
+        self.reply_received = reply_received
+        self.idle_received = idle_received
+        self.reply_status = reply_status
+        self.error_name = error_name
+        self.error_value = error_value
+        self.traceback = list(traceback) if traceback is not None else None
+        if requested_terminal is not None:
+            self.request_interrupt(requested_terminal)
+
+    @property
+    def terminal_state(self) -> str | None:
+        return self._terminal_state()
+
     def observe(self, event: KernelEvent) -> ProofObservation:
         message = event.message
         parent = message.get("parent_header")
@@ -229,6 +258,41 @@ class ReadinessProof:
         return True
 
 
+class KernelIdleProof:
+    """Prove that a newly connected kernel crossed a request/idle boundary."""
+
+    def __init__(self, message_id: str):
+        self.message_id = message_id
+        self.reply_received = False
+        self.idle_received = False
+
+    @property
+    def idle(self) -> bool:
+        return self.reply_received and self.idle_received
+
+    def observe(self, event: KernelEvent) -> bool:
+        parent = event.message.get("parent_header")
+        if not isinstance(parent, dict) or parent.get("msg_id") != self.message_id:
+            return False
+        message_type = ExecutionProof._message_type(event.message)
+        content = event.message.get("content")
+        if (
+            event.channel == "shell"
+            and message_type == "kernel_info_reply"
+            and isinstance(content, dict)
+            and content.get("status", "ok") == "ok"
+        ):
+            self.reply_received = True
+        elif (
+            event.channel == "iopub"
+            and message_type == "status"
+            and isinstance(content, dict)
+            and content.get("execution_state") == "idle"
+        ):
+            self.idle_received = True
+        return True
+
+
 class KernelTransportAdapter:
     """Single-reader adapter around the pinned blocking websocket client."""
 
@@ -320,6 +384,13 @@ class KernelTransportAdapter:
             "stop_on_error": True,
         }
         message = self._client.session.msg("execute_request", content)
+        return PreparedExecution(
+            message_id=str(message["header"]["msg_id"]),
+            message=message,
+        )
+
+    def prepare_kernel_info(self) -> PreparedExecution:
+        message = self._client.session.msg("kernel_info_request", {})
         return PreparedExecution(
             message_id=str(message["header"]["msg_id"]),
             message=message,

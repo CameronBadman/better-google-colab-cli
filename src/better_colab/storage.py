@@ -21,6 +21,7 @@ from typing import Any, Callable, Iterator, Sequence
 from better_colab.errors import ExitCode, api_error
 from better_colab.models import (
     Artifact,
+    CompletionSource,
     ExecutionState,
     OutputEvent,
     OutputPage,
@@ -282,7 +283,7 @@ class ExecutionRecord(PublicModel):
     dispatch_confirmed: bool
     reply_received: bool
     idle_received: bool
-    completion_source: str | None = None
+    completion_source: CompletionSource | None = None
     output_complete: bool
     output_spool_path: str | None = None
     output_byte_size: int = 0
@@ -1347,7 +1348,7 @@ class DurableStore:
         *,
         reason: str | None = None,
         evidence: dict[str, Any] | None = None,
-        completion_source: str | None = None,
+        completion_source: CompletionSource | str | None = None,
     ) -> ExecutionRecord:
         with self.transaction() as connection:
             current = self._require_execution(connection, execution_id)
@@ -1520,6 +1521,116 @@ class DurableStore:
                     self._time(),
                     execution_id,
                 ),
+            )
+        return self.get_execution(execution_id)
+
+    @staticmethod
+    def _terminal_state_from_evidence(
+        record: ExecutionRecord,
+    ) -> ExecutionState | None:
+        if not (record.reply_received and record.idle_received):
+            return None
+        if record.reply_status == "ok":
+            return ExecutionState.FINISHED
+        if (
+            record.interrupt_requested_state
+            in {
+                ExecutionState.INTERRUPTED.value,
+                ExecutionState.TIMED_OUT.value,
+            }
+            and (
+                record.reply_status == "aborted"
+                or record.error_name
+                in {
+                    "KeyboardInterrupt",
+                    "InterruptedError",
+                    "CancelledError",
+                }
+            )
+        ):
+            return ExecutionState(record.interrupt_requested_state)
+        if record.reply_status in {"error", "aborted"}:
+            return ExecutionState.ERROR
+        return None
+
+    def reconcile_after_restart(self) -> list[str]:
+        """Resolve durable proof and identify confirmed work to reconnect."""
+        rows = self.connection.execute(
+            """
+            SELECT execution_id FROM executions
+            WHERE profile_id = ? AND state IN (?, ?, ?)
+            ORDER BY queued_at, execution_id
+            """,
+            (
+                self.profile.profile_id,
+                ExecutionState.DISPATCHING.value,
+                ExecutionState.RUNNING.value,
+                ExecutionState.DISCONNECTED.value,
+            ),
+        )
+        recovery_ids: list[str] = []
+        for row in rows:
+            execution_id = row["execution_id"]
+            record = self.get_execution(execution_id)
+            if record is None:
+                continue
+            if record.state is ExecutionState.DISPATCHING:
+                self.mark_output_incomplete(execution_id)
+                self.finalize_output(execution_id)
+                self.transition_execution(
+                    execution_id,
+                    ExecutionState.UNKNOWN,
+                    reason="controller_restart_before_confirmation",
+                    completion_source=CompletionSource.RECOVERY,
+                )
+                continue
+
+            terminal_state = self._terminal_state_from_evidence(record)
+            if terminal_state is not None:
+                self.finalize_output(execution_id)
+                self.transition_execution(
+                    execution_id,
+                    terminal_state,
+                    reason="terminal_proof_already_durable",
+                    evidence={
+                        "reply_received": True,
+                        "idle_received": True,
+                        "reply_status": record.reply_status,
+                    },
+                    completion_source=CompletionSource.DURABLE_EVIDENCE,
+                )
+                continue
+
+            if record.state is ExecutionState.RUNNING:
+                self.mark_output_incomplete(execution_id)
+                self.transition_execution(
+                    execution_id,
+                    ExecutionState.DISCONNECTED,
+                    reason="controller_restarted_during_execution",
+                )
+            else:
+                self.mark_output_incomplete(execution_id)
+            recovery_ids.append(execution_id)
+        return recovery_ids
+
+    def increment_reconnect_count(self, execution_id: str) -> ExecutionRecord:
+        with self.transaction() as connection:
+            current = self._require_execution(connection, execution_id)
+            if current.state is not ExecutionState.DISCONNECTED:
+                raise api_error(
+                    "INVALID_EXECUTION_RECONNECT",
+                    f"Cannot reconnect execution in {current.state.value}",
+                    exit_code=ExitCode.CONFLICT,
+                    retryable=False,
+                    suggested_action="refresh_execution_status",
+                )
+            connection.execute(
+                """
+                UPDATE executions
+                SET reconnect_count = reconnect_count + 1, updated_at = ?
+                WHERE execution_id = ?
+                """,
+                (self._time(), execution_id),
             )
         return self.get_execution(execution_id)
 

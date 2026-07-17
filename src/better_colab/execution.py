@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import queue
 import threading
@@ -17,17 +18,19 @@ from better_colab.errors import ExitCode, api_error
 from better_colab.kernel_transport import (
     ExecutionProof,
     KernelEvent,
+    KernelIdleProof,
     KernelTransportAdapter,
     PreparedExecution,
     ReadinessProof,
     TransportDisconnected,
 )
-from better_colab.models import ExecutionState, SessionHealthResult
+from better_colab.models import CompletionSource, ExecutionState, SessionHealthResult
 from better_colab.storage import (
     DurableStore,
     ProfileSpec,
     StatePaths,
     StoredSession,
+    parse_timestamp,
 )
 
 
@@ -38,6 +41,8 @@ class ExecutionTransport(Protocol):
     def prepare_execution(self, code: str) -> PreparedExecution: ...
 
     def prepare_readiness_probe(self, nonce: str) -> PreparedExecution: ...
+
+    def prepare_kernel_info(self) -> PreparedExecution: ...
 
     def send(self, prepared: PreparedExecution) -> None: ...
 
@@ -179,6 +184,9 @@ class _KernelWorker:
     def submit(self, execution_id: str) -> None:
         self.items.put(_WorkItem(kind="execute", execution_id=execution_id))
 
+    def recover(self, execution_id: str) -> None:
+        self.items.put(_WorkItem(kind="recover", execution_id=execution_id))
+
     def probe(self, *, timeout: float) -> SessionHealthResult:
         request = _ProbeRequest(
             timeout=timeout,
@@ -210,6 +218,9 @@ class _KernelWorker:
                     if item.kind == "execute":
                         assert execution_id is not None
                         self._run_one(execution_id)
+                    elif item.kind == "recover":
+                        assert execution_id is not None
+                        self._recover_one(execution_id)
                     elif item.kind == "probe":
                         assert item.probe is not None
                         self._run_probe(item.probe)
@@ -601,9 +612,19 @@ class _KernelWorker:
                     continue
                 except TransportDisconnected:
                     self._connection_lost(store, execution_id, proof)
+                    if (
+                        store.get_execution(execution_id).state
+                        is ExecutionState.DISCONNECTED
+                    ):
+                        self._recover_one(execution_id)
                     return
                 except Exception:
                     self._connection_lost(store, execution_id, proof)
+                    if (
+                        store.get_execution(execution_id).state
+                        is ExecutionState.DISCONNECTED
+                    ):
+                        self._recover_one(execution_id)
                     return
 
                 observation = proof.observe(event)
@@ -663,6 +684,213 @@ class _KernelWorker:
                     )
                     self.notify(self.profile, execution_id)
                     return
+
+    @staticmethod
+    def _restored_proof(record) -> ExecutionProof:
+        proof = ExecutionProof(record.kernel_message_id)
+        traceback: list[str] | None = None
+        if record.traceback_json is not None:
+            with contextlib.suppress(json.JSONDecodeError):
+                candidate = json.loads(record.traceback_json)
+                if isinstance(candidate, list) and all(
+                    isinstance(line, str) for line in candidate
+                ):
+                    traceback = candidate
+        proof.restore(
+            dispatch_confirmed=record.dispatch_confirmed,
+            reply_received=record.reply_received,
+            idle_received=record.idle_received,
+            reply_status=record.reply_status,
+            error_name=record.error_name,
+            error_value=record.error_value,
+            traceback=traceback,
+            requested_terminal=record.interrupt_requested_state,
+        )
+        return proof
+
+    def _recovery_unknown(
+        self,
+        store: DurableStore,
+        execution_id: str,
+        *,
+        reason: str,
+        evidence: dict[str, Any] | None = None,
+    ) -> None:
+        current = store.get_execution(execution_id)
+        if current is None or current.state is not ExecutionState.DISCONNECTED:
+            return
+        store.mark_output_incomplete(execution_id)
+        store.finalize_output(execution_id)
+        store.transition_execution(
+            execution_id,
+            ExecutionState.UNKNOWN,
+            reason=reason,
+            evidence=evidence,
+            completion_source=CompletionSource.RECOVERY,
+        )
+        self.notify(self.profile, execution_id)
+
+    def _recover_one(self, execution_id: str) -> None:
+        """Reconnect to the same kernel without ever replaying the request."""
+        with DurableStore(paths=self.paths, profile=self.profile) as store:
+            while not self.stop_event.is_set():
+                record = store.get_execution(execution_id)
+                if record is None or record.state is not ExecutionState.DISCONNECTED:
+                    return
+                session = store.get_session(record.session_name)
+                if session is None:
+                    self._recovery_unknown(
+                        store,
+                        execution_id,
+                        reason="session_missing_during_recovery",
+                    )
+                    return
+                if (
+                    record.session_endpoint is None
+                    or session.endpoint != record.session_endpoint
+                ):
+                    self._recovery_unknown(
+                        store,
+                        execution_id,
+                        reason="session_identity_changed_during_recovery",
+                    )
+                    return
+
+                try:
+                    transport = self._ensure_transport(store, session)
+                except Exception:
+                    if self.stop_event.wait(0.1):
+                        return
+                    continue
+                if (
+                    record.kernel_id_snapshot is None
+                    or record.jupyter_session_id_snapshot is None
+                    or transport.kernel_id != record.kernel_id_snapshot
+                    or transport.jupyter_session_id
+                    != record.jupyter_session_id_snapshot
+                ):
+                    self._recovery_unknown(
+                        store,
+                        execution_id,
+                        reason="kernel_identity_changed_during_recovery",
+                        evidence={
+                            "expected_kernel_id": record.kernel_id_snapshot,
+                            "observed_kernel_id": transport.kernel_id,
+                            "expected_jupyter_session_id": (
+                                record.jupyter_session_id_snapshot
+                            ),
+                            "observed_jupyter_session_id": (
+                                transport.jupyter_session_id
+                            ),
+                        },
+                    )
+                    self._drop_transport(store)
+                    return
+
+                try:
+                    prepared = transport.prepare_kernel_info()
+                    idle_proof = KernelIdleProof(prepared.message_id)
+                    proof = self._restored_proof(record)
+                    store.increment_reconnect_count(execution_id)
+                    transport.send(prepared)
+                except Exception:
+                    self._drop_transport(store)
+                    if self.stop_event.wait(0.1):
+                        return
+                    continue
+
+                interrupt_sent = False
+                while not self.stop_event.is_set():
+                    current = store.get_execution(execution_id)
+                    if (
+                        current is None
+                        or current.state is not ExecutionState.DISCONNECTED
+                    ):
+                        return
+
+                    requested = current.interrupt_requested_state
+                    if (
+                        requested is None
+                        and current.execution_deadline is not None
+                        and datetime.now(timezone.utc)
+                        >= parse_timestamp(current.execution_deadline)
+                    ):
+                        current = store.request_execution_timeout(execution_id)
+                        requested = current.interrupt_requested_state
+                        self.notify(self.profile, execution_id)
+                    if requested is not None and not interrupt_sent:
+                        proof.request_interrupt(requested)
+                        interrupt_sent = True
+                        try:
+                            transport.interrupt()
+                        except Exception:
+                            self._ambiguous_interrupt(store, execution_id)
+                            return
+
+                    try:
+                        event = transport.next_event(timeout=0.05)
+                    except TimeoutError:
+                        continue
+                    except Exception:
+                        self._drop_transport(store)
+                        self.notify(self.profile, execution_id)
+                        break
+
+                    observation = proof.observe(event)
+                    if observation.matched:
+                        output = _normalize_output(event)
+                        if output is not None:
+                            store.append_output_event(execution_id, output)
+                        if (
+                            observation.reply_received
+                            or observation.idle_received
+                            or observation.error_name is not None
+                            or observation.traceback is not None
+                        ):
+                            store.record_execution_evidence(
+                                execution_id,
+                                reply_received=observation.reply_received,
+                                idle_received=observation.idle_received,
+                                reply_status=(
+                                    observation.reply_status
+                                    if observation.reply_received
+                                    else None
+                                ),
+                                error_name=observation.error_name,
+                                error_value=observation.error_value,
+                                traceback=observation.traceback,
+                            )
+                            self.notify(self.profile, execution_id)
+                        if observation.terminal_state is not None:
+                            store.finalize_output(execution_id)
+                            store.transition_execution(
+                                execution_id,
+                                ExecutionState(observation.terminal_state),
+                                reason=(
+                                    "matching_execute_reply_and_idle_after_reconnect"
+                                ),
+                                evidence={
+                                    "kernel_message_id": record.kernel_message_id,
+                                    "reply_status": observation.reply_status,
+                                },
+                                completion_source=CompletionSource.RECOVERY,
+                            )
+                            self.notify(self.profile, execution_id)
+                            return
+
+                    idle_proof.observe(event)
+                    if idle_proof.idle:
+                        self._recovery_unknown(
+                            store,
+                            execution_id,
+                            reason="kernel_idle_without_terminal_proof",
+                            evidence={
+                                "kernel_info_message_id": prepared.message_id,
+                                "reply_received": proof.reply_received,
+                                "idle_received": proof.idle_received,
+                            },
+                        )
+                        return
 
     @staticmethod
     def _message_type(event: KernelEvent) -> str | None:
@@ -829,6 +1057,29 @@ class ExecutionCoordinator:
             self._pending += 1
             self._scheduled.add(execution_id)
             worker.submit(execution_id)
+
+    def recover(self, profile: ProfileSpec, execution_id: str) -> None:
+        with DurableStore(paths=self.paths, profile=profile) as store:
+            record = store.get_execution(execution_id)
+            if record is None:
+                raise api_error(
+                    "EXECUTION_NOT_FOUND",
+                    f"Execution not found: {execution_id}",
+                    exit_code=ExitCode.NOT_FOUND,
+                    retryable=False,
+                    suggested_action="list_executions",
+                )
+            if record.state is not ExecutionState.DISCONNECTED:
+                return
+            session_name = record.session_name
+        worker = self._worker(profile, session_name, create=True)
+        assert worker is not None
+        with self._condition:
+            if execution_id in self._scheduled:
+                return
+            self._pending += 1
+            self._scheduled.add(execution_id)
+            worker.recover(execution_id)
 
     def session_status(
         self,
