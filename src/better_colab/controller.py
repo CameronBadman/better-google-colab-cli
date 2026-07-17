@@ -105,6 +105,7 @@ class ControllerServer:
         coordinator_kwargs: dict[str, Any] = {
             "paths": self.paths,
             "notify": self._notify_from_worker,
+            "notify_batch": self._notify_batch_from_worker,
         }
         if self._transport_factory is not None:
             coordinator_kwargs["transport_factory"] = self._transport_factory
@@ -841,6 +842,37 @@ class ControllerServer:
             topic.payload = payload
             topic.condition.notify_all()
 
+    @staticmethod
+    def _batch_topic(profile: ProfileSpec, batch_id: str) -> str:
+        return f"batch:{profile.profile_id}:{batch_id}"
+
+    def _notify_batch_from_worker(
+        self,
+        profile: ProfileSpec,
+        batch_id: str,
+    ) -> None:
+        if self._loop is None or self._loop.is_closed():
+            return
+        self._loop.call_soon_threadsafe(
+            lambda: asyncio.create_task(
+                self._publish_batch(profile, batch_id)
+            )
+        )
+
+    async def _publish_batch(
+        self,
+        profile: ProfileSpec,
+        batch_id: str,
+    ) -> None:
+        topic = self._topic(self._batch_topic(profile, batch_id))
+        with DurableStore(paths=self.paths, profile=profile) as store:
+            batch = store.get_batch(batch_id)
+            payload = batch.to_wire() if batch is not None else None
+        async with topic.condition:
+            topic.revision += 1
+            topic.payload = payload
+            topic.condition.notify_all()
+
     def _reconcile_and_resume(self) -> None:
         assert self._coordinator is not None
         for profile in self._profile_specs():
@@ -848,10 +880,20 @@ class ControllerServer:
                 store.invalidate_kernel_connections()
                 recovery_ids = store.reconcile_after_restart()
                 queued = store.list_queued_executions()
+                batches = store.list_active_batches()
+                batch_members = {
+                    execution_id
+                    for batch in batches
+                    for execution_id in store.list_batch_members(batch.batch_id)
+                }
+            for batch in batches:
+                self._coordinator.submit_batch(profile, batch.batch_id)
             for execution_id in recovery_ids:
-                self._coordinator.recover(profile, execution_id)
+                if execution_id not in batch_members:
+                    self._coordinator.recover(profile, execution_id)
             for record in queued:
-                self._coordinator.submit(profile, record.execution_id)
+                if record.execution_id not in batch_members:
+                    self._coordinator.submit(profile, record.execution_id)
 
     def _topic(self, name: str) -> _Topic:
         topic = self._topics.get(name)

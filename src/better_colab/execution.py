@@ -70,6 +70,7 @@ class _ProbeRequest:
 class _WorkItem:
     kind: str
     execution_id: str | None = None
+    batch_id: str | None = None
     probe: _ProbeRequest | None = None
 
 
@@ -162,6 +163,7 @@ class _KernelWorker:
         session_name: str,
         transport_factory: TransportFactory,
         notify: NotifyCallback,
+        notify_batch: NotifyCallback,
         completed: Callable[[str], None],
     ):
         self.paths = paths
@@ -169,6 +171,7 @@ class _KernelWorker:
         self.session_name = session_name
         self.transport_factory = transport_factory
         self.notify = notify
+        self.notify_batch = notify_batch
         self.completed = completed
         self.items: queue.Queue[_WorkItem | None] = queue.Queue()
         self.stop_event = threading.Event()
@@ -186,6 +189,9 @@ class _KernelWorker:
 
     def recover(self, execution_id: str) -> None:
         self.items.put(_WorkItem(kind="recover", execution_id=execution_id))
+
+    def submit_batch(self, batch_id: str) -> None:
+        self.items.put(_WorkItem(kind="batch", batch_id=batch_id))
 
     def probe(self, *, timeout: float) -> SessionHealthResult:
         request = _ProbeRequest(
@@ -211,6 +217,12 @@ class _KernelWorker:
         while True:
             item = self.items.get()
             execution_id = item.execution_id if item is not None else None
+            batch_id = item.batch_id if item is not None else None
+            work_key = (
+                execution_id
+                if execution_id is not None
+                else (f"batch:{batch_id}" if batch_id is not None else None)
+            )
             try:
                 if item is None:
                     return
@@ -221,6 +233,9 @@ class _KernelWorker:
                     elif item.kind == "recover":
                         assert execution_id is not None
                         self._recover_one(execution_id)
+                    elif item.kind == "batch":
+                        assert batch_id is not None
+                        self._run_batch(batch_id)
                     elif item.kind == "probe":
                         assert item.probe is not None
                         self._run_probe(item.probe)
@@ -233,13 +248,39 @@ class _KernelWorker:
                             execution_id,
                         )
                         self._internal_failure(execution_id, error)
+                    elif batch_id is not None:
+                        logging.exception(
+                            "Durable execution batch worker failed for %s",
+                            batch_id,
+                        )
+                        self._batch_internal_failure(batch_id)
                     elif item.probe is not None:
                         item.probe.error = error
                         item.probe.completed.set()
             finally:
                 self.items.task_done()
-                if execution_id is not None:
-                    self.completed(execution_id)
+                if work_key is not None:
+                    self.completed(work_key)
+
+    def _batch_internal_failure(self, batch_id: str) -> None:
+        with DurableStore(paths=self.paths, profile=self.profile) as store:
+            batch = store.get_batch(batch_id)
+            if batch is None or batch.state in {
+                "finished",
+                "error",
+                "interrupted",
+            }:
+                return
+            for execution_id in store.list_batch_members(batch_id):
+                record = store.get_execution(execution_id)
+                if record is not None and record.state is ExecutionState.QUEUED:
+                    store.stop_queued_execution(
+                        execution_id,
+                        reason="batch_worker_failed",
+                    )
+                    self.notify(self.profile, execution_id)
+            store.set_batch_state(batch_id, "error")
+        self.notify_batch(self.profile, batch_id)
 
     def _internal_failure(
         self,
@@ -892,6 +933,73 @@ class _KernelWorker:
                         )
                         return
 
+    def _run_batch(self, batch_id: str) -> None:
+        with DurableStore(paths=self.paths, profile=self.profile) as store:
+            batch = store.get_batch(batch_id)
+            if batch is None or batch.state in {
+                "finished",
+                "error",
+                "interrupted",
+            }:
+                return
+            if batch.state == "queued":
+                batch = store.set_batch_state(batch_id, "running")
+                self.notify_batch(self.profile, batch_id)
+            members = store.list_batch_members(batch_id)
+            saw_failure = False
+            for position, execution_id in enumerate(members):
+                batch = store.get_batch(batch_id)
+                if batch is None:
+                    return
+                record = store.get_execution(execution_id)
+                if record is None:
+                    saw_failure = True
+                    continue
+                if record.state is ExecutionState.DISCONNECTED:
+                    self._recover_one(execution_id)
+                elif record.state is ExecutionState.QUEUED:
+                    self._run_one(execution_id)
+                record = store.get_execution(execution_id)
+                if record is None:
+                    saw_failure = True
+                    continue
+                failed = record.state in {
+                    ExecutionState.ERROR,
+                    ExecutionState.INTERRUPTED,
+                    ExecutionState.TIMED_OUT,
+                    ExecutionState.UNKNOWN,
+                }
+                saw_failure = saw_failure or failed
+                batch = store.get_batch(batch_id)
+                cancelling = batch is not None and batch.state == "cancelling"
+                if failed and not batch.continue_on_error and not cancelling:
+                    for remaining_id in members[position + 1 :]:
+                        remaining = store.stop_queued_execution(
+                            remaining_id,
+                            reason="batch_stopped",
+                        )
+                        if remaining.state is ExecutionState.INTERRUPTED:
+                            self.notify(self.profile, remaining_id)
+                    store.set_batch_state(batch_id, "error")
+                    self.notify_batch(self.profile, batch_id)
+                    return
+                if cancelling:
+                    # Cancellation marks all queued members terminal
+                    # immediately and running work observes interrupt intent.
+                    continue
+
+            batch = store.get_batch(batch_id)
+            if batch is None:
+                return
+            if batch.state == "cancelling":
+                final_state = "interrupted"
+            elif saw_failure:
+                final_state = "error"
+            else:
+                final_state = "finished"
+            store.set_batch_state(batch_id, final_state)
+        self.notify_batch(self.profile, batch_id)
+
     @staticmethod
     def _message_type(event: KernelEvent) -> str | None:
         header = event.message.get("header")
@@ -1001,10 +1109,14 @@ class ExecutionCoordinator:
         paths: StatePaths | None = None,
         transport_factory: TransportFactory = _default_transport_factory,
         notify: NotifyCallback | None = None,
+        notify_batch: NotifyCallback | None = None,
     ):
         self.paths = paths or StatePaths.discover()
         self.transport_factory = transport_factory
         self.notify = notify or (lambda _profile, _execution_id: None)
+        self.notify_batch = notify_batch or (
+            lambda _profile, _batch_id: None
+        )
         self._workers: dict[tuple[str, str], _KernelWorker] = {}
         self._condition = threading.Condition()
         self._pending = 0
@@ -1030,6 +1142,7 @@ class ExecutionCoordinator:
                     session_name=session_name,
                     transport_factory=self.transport_factory,
                     notify=self.notify,
+                    notify_batch=self.notify_batch,
                     completed=self._completed,
                 )
                 self._workers[key] = worker
@@ -1080,6 +1193,38 @@ class ExecutionCoordinator:
             self._pending += 1
             self._scheduled.add(execution_id)
             worker.recover(execution_id)
+
+    def submit_batch(self, profile: ProfileSpec, batch_id: str) -> None:
+        with DurableStore(paths=self.paths, profile=profile) as store:
+            batch = store.get_batch(batch_id)
+            if batch is None:
+                raise api_error(
+                    "BATCH_NOT_FOUND",
+                    f"Batch not found: {batch_id}",
+                    exit_code=ExitCode.NOT_FOUND,
+                    retryable=False,
+                    suggested_action="inspect_batch_id",
+                )
+            if batch.state in {"finished", "error", "interrupted"}:
+                return
+            session_name = batch.session_name
+        worker = self._worker(profile, session_name, create=True)
+        assert worker is not None
+        key = f"batch:{batch_id}"
+        with self._condition:
+            if key in self._scheduled:
+                return
+            self._pending += 1
+            self._scheduled.add(key)
+            worker.submit_batch(batch_id)
+
+    def cancel_batch(self, profile: ProfileSpec, batch_id: str):
+        with DurableStore(paths=self.paths, profile=profile) as store:
+            batch = store.request_batch_cancel(batch_id)
+            for execution_id in store.list_batch_members(batch_id):
+                self.notify(profile, execution_id)
+        self.notify_batch(profile, batch_id)
+        return batch
 
     def session_status(
         self,

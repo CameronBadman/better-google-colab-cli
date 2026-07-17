@@ -2563,6 +2563,104 @@ class DurableStore:
             )
         ]
 
+    def list_active_batches(self) -> list[BatchRecord]:
+        rows = self.connection.execute(
+            """
+            SELECT batch_id FROM execution_batches
+            WHERE profile_id = ? AND state IN ('queued', 'running', 'cancelling')
+            ORDER BY created_at, batch_id
+            """,
+            (self.profile.profile_id,),
+        )
+        return [self.get_batch(row["batch_id"]) for row in rows]
+
+    def set_batch_state(self, batch_id: str, state: str) -> BatchRecord:
+        supported = {
+            "queued",
+            "running",
+            "cancelling",
+            "finished",
+            "error",
+            "interrupted",
+        }
+        if state not in supported:
+            raise ValueError(f"unsupported batch state: {state}")
+        with self.transaction() as connection:
+            current = self.get_batch(batch_id)
+            if current is None:
+                raise api_error(
+                    "BATCH_NOT_FOUND",
+                    f"Batch not found: {batch_id}",
+                    exit_code=ExitCode.NOT_FOUND,
+                    retryable=False,
+                    suggested_action="inspect_batch_id",
+                )
+            if current.state in {"finished", "error", "interrupted"}:
+                return current
+            now = self._time()
+            connection.execute(
+                """
+                UPDATE execution_batches
+                SET state = ?, updated_at = ?,
+                    completed_at = CASE
+                        WHEN ? IN ('finished', 'error', 'interrupted') THEN ?
+                        ELSE completed_at
+                    END
+                WHERE batch_id = ? AND profile_id = ?
+                """,
+                (
+                    state,
+                    now,
+                    state,
+                    now,
+                    batch_id,
+                    self.profile.profile_id,
+                ),
+            )
+        return self.get_batch(batch_id)
+
+    def stop_queued_execution(
+        self,
+        execution_id: str,
+        *,
+        reason: str,
+    ) -> ExecutionRecord:
+        current = self.get_execution(execution_id)
+        if current is None:
+            raise api_error(
+                "EXECUTION_NOT_FOUND",
+                f"Execution not found: {execution_id}",
+                exit_code=ExitCode.NOT_FOUND,
+                retryable=False,
+                suggested_action="list_executions",
+            )
+        if current.state is not ExecutionState.QUEUED:
+            return current
+        self.finalize_output(execution_id)
+        return self.transition_execution(
+            execution_id,
+            ExecutionState.INTERRUPTED,
+            reason=reason,
+            completion_source=CompletionSource.LIVE,
+        )
+
+    def request_batch_cancel(self, batch_id: str) -> BatchRecord:
+        batch = self.get_batch(batch_id)
+        if batch is None:
+            raise api_error(
+                "BATCH_NOT_FOUND",
+                f"Batch not found: {batch_id}",
+                exit_code=ExitCode.NOT_FOUND,
+                retryable=False,
+                suggested_action="inspect_batch_id",
+            )
+        if batch.state in {"finished", "error", "interrupted"}:
+            return batch
+        batch = self.set_batch_state(batch_id, "cancelling")
+        for execution_id in self.list_batch_members(batch_id):
+            self.request_execution_cancel(execution_id)
+        return batch
+
     def create_artifact(
         self,
         *,
