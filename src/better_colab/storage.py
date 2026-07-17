@@ -5,13 +5,14 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import math
 import os
 import sqlite3
 import tempfile
 import threading
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Sequence
 
@@ -25,7 +26,7 @@ from better_colab.models import (
 )
 
 
-DATABASE_SCHEMA_VERSION = 1
+DATABASE_SCHEMA_VERSION = 2
 TERMINAL_STATES = frozenset(
     {
         ExecutionState.FINISHED,
@@ -271,8 +272,11 @@ class ExecutionRecord(PublicModel):
     idle_received: bool
     completion_source: str | None = None
     output_complete: bool
+    execution_timeout_seconds: float | None = None
     execution_deadline: str | None = None
     cancel_requested: bool
+    interrupt_requested_state: str | None = None
+    reply_status: str | None = None
     reconnect_count: int
     error_name: str | None = None
     error_value: str | None = None
@@ -460,6 +464,12 @@ CREATE TABLE kernel_connections (
 );
 """
 
+MIGRATION_2 = """
+ALTER TABLE executions ADD COLUMN execution_timeout_seconds REAL;
+ALTER TABLE executions ADD COLUMN interrupt_requested_state TEXT;
+ALTER TABLE executions ADD COLUMN reply_status TEXT;
+"""
+
 
 class DurableStore:
     """One profile view over the shared controller database."""
@@ -517,9 +527,14 @@ class DurableStore:
             )
         if current == 0:
             self.connection.executescript(SCHEMA_V1)
-            self.connection.execute(
-                f"PRAGMA user_version={DATABASE_SCHEMA_VERSION}"
-            )
+            self.connection.execute("PRAGMA user_version=1")
+            current = 1
+        if current == 1:
+            with self.transaction() as connection:
+                for statement in MIGRATION_2.split(";"):
+                    if statement.strip():
+                        connection.execute(statement)
+                connection.execute("PRAGMA user_version=2")
 
     @contextlib.contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -742,6 +757,38 @@ class DurableStore:
         )
         return [StoredSession.model_validate(dict(row)) for row in rows]
 
+    def update_session_connection(
+        self,
+        name: str,
+        *,
+        kernel_id: str,
+        jupyter_session_id: str,
+    ) -> StoredSession:
+        with self.transaction() as connection:
+            result = connection.execute(
+                """
+                UPDATE sessions SET kernel_id = ?, jupyter_session_id = ?,
+                    updated_at = ?
+                WHERE profile_id = ? AND name = ?
+                """,
+                (
+                    kernel_id,
+                    jupyter_session_id,
+                    self._time(),
+                    self.profile.profile_id,
+                    name,
+                ),
+            )
+            if result.rowcount != 1:
+                raise api_error(
+                    "SESSION_NOT_FOUND",
+                    f"Session not found: {name}",
+                    exit_code=ExitCode.NOT_FOUND,
+                    retryable=False,
+                    suggested_action="ensure_session",
+                )
+        return self.get_session(name)
+
     def delete_session(self, name: str) -> None:
         with self.transaction() as connection:
             connection.execute(
@@ -796,7 +843,19 @@ class DurableStore:
         provenance: dict[str, Any],
         request: dict[str, Any],
         idempotency_key: str | None = None,
+        execution_timeout_seconds: float | None = None,
     ) -> ExecutionRecord:
+        if execution_timeout_seconds is not None and (
+            not math.isfinite(execution_timeout_seconds)
+            or execution_timeout_seconds <= 0
+        ):
+            raise api_error(
+                "INVALID_EXECUTION_TIMEOUT",
+                "execution timeout must be a finite positive number",
+                exit_code=ExitCode.USAGE,
+                retryable=False,
+                suggested_action="use_a_positive_timeout",
+            )
         request_hash = self._request_hash(request)
         source_hash = self.sha256(source)
         source_path: Path | None = None
@@ -844,6 +903,14 @@ class DurableStore:
                     """,
                     (self.profile.profile_id, session_name),
                 ).fetchone()
+                if session is None:
+                    raise api_error(
+                        "SESSION_NOT_FOUND",
+                        f"Session not found: {session_name}",
+                        exit_code=ExitCode.NOT_FOUND,
+                        retryable=False,
+                        suggested_action="ensure_session",
+                    )
                 source_path = self._atomic_write(
                     self.paths.sources_dir,
                     f"{execution_id}.source",
@@ -858,9 +925,10 @@ class DurableStore:
                         jupyter_session_id_snapshot, idempotency_key,
                         request_hash, source_kind, source_path, notebook_id,
                         cell_id, cell_index, source_sha256, source_spool_path,
-                        state, created_at, queued_at, updated_at
+                        state, execution_timeout_seconds,
+                        created_at, queued_at, updated_at
                     ) VALUES (
-                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                     )
                     """,
                     (
@@ -880,6 +948,7 @@ class DurableStore:
                         source_hash,
                         str(source_path),
                         ExecutionState.QUEUED.value,
+                        execution_timeout_seconds,
                         now,
                         now,
                         now,
@@ -919,9 +988,11 @@ class DurableStore:
                    notebook_id, cell_id, cell_index, source_sha256,
                    source_spool_path, state, kernel_message_id,
                    dispatch_confirmed, reply_received, idle_received,
-                   completion_source, output_complete, execution_deadline,
-                   cancel_requested, reconnect_count, error_name, error_value,
-                   traceback_json, created_at, queued_at, started_at,
+                   completion_source, output_complete,
+                   execution_timeout_seconds, execution_deadline,
+                   cancel_requested, interrupt_requested_state, reply_status,
+                   reconnect_count, error_name, error_value, traceback_json,
+                   created_at, queued_at, started_at,
                    completed_at, updated_at
             FROM executions
             WHERE execution_id = ? AND profile_id = ?
@@ -932,6 +1003,96 @@ class DurableStore:
 
     def get_execution(self, execution_id: str) -> ExecutionRecord | None:
         return self._get_execution(self.connection, execution_id)
+
+    def read_execution_source(self, execution_id: str) -> bytes:
+        record = self.get_execution(execution_id)
+        if record is None:
+            raise api_error(
+                "EXECUTION_NOT_FOUND",
+                f"Execution not found: {execution_id}",
+                exit_code=ExitCode.NOT_FOUND,
+                retryable=False,
+                suggested_action="list_executions",
+            )
+        if record.state is not ExecutionState.QUEUED or not record.source_spool_path:
+            raise api_error(
+                "EXECUTION_SOURCE_UNAVAILABLE",
+                "Execution source is available only while safely queued",
+                exit_code=ExitCode.CONFLICT,
+                retryable=False,
+                suggested_action="refresh_execution_status",
+            )
+        try:
+            source = Path(record.source_spool_path).read_bytes()
+        except OSError as error:
+            raise api_error(
+                "EXECUTION_SOURCE_UNAVAILABLE",
+                "Durably queued execution source could not be read",
+                exit_code=ExitCode.UNAVAILABLE,
+                retryable=False,
+                suggested_action="inspect_local_state",
+                details={"error": str(error)},
+            ) from error
+        if self.sha256(source) != record.source_sha256:
+            raise api_error(
+                "EXECUTION_SOURCE_CORRUPT",
+                "Durably queued execution source failed its SHA-256 check",
+                exit_code=ExitCode.CONFLICT,
+                retryable=False,
+                suggested_action="inspect_local_state",
+            )
+        return source
+
+    def begin_dispatch(
+        self,
+        execution_id: str,
+        *,
+        kernel_message_id: str,
+        session_endpoint: str,
+        kernel_id: str,
+        jupyter_session_id: str,
+    ) -> ExecutionRecord:
+        if not kernel_message_id:
+            raise ValueError("kernel_message_id must not be empty")
+        with self.transaction() as connection:
+            current = self._require_execution(connection, execution_id)
+            if current.state is not ExecutionState.QUEUED:
+                raise api_error(
+                    "INVALID_EXECUTION_TRANSITION",
+                    f"Cannot dispatch execution in {current.state.value}",
+                    exit_code=ExitCode.CONFLICT,
+                    retryable=False,
+                    suggested_action="refresh_execution_status",
+                )
+            now = self._time()
+            connection.execute(
+                """
+                UPDATE executions
+                SET state = ?, session_endpoint = ?,
+                    kernel_id_snapshot = ?, jupyter_session_id_snapshot = ?,
+                    kernel_message_id = ?, updated_at = ?
+                WHERE execution_id = ?
+                """,
+                (
+                    ExecutionState.DISPATCHING.value,
+                    session_endpoint,
+                    kernel_id,
+                    jupyter_session_id,
+                    kernel_message_id,
+                    now,
+                    execution_id,
+                ),
+            )
+            self._insert_transition(
+                connection,
+                execution_id,
+                ExecutionState.QUEUED,
+                ExecutionState.DISPATCHING,
+                reason="request_prepared_before_send",
+                evidence={"kernel_message_id": kernel_message_id},
+                created_at=now,
+            )
+        return self.get_execution(execution_id)
 
     def _require_execution(
         self, connection: sqlite3.Connection, execution_id: str
@@ -991,6 +1152,7 @@ class DurableStore:
         *,
         reason: str | None = None,
         evidence: dict[str, Any] | None = None,
+        completion_source: str | None = None,
     ) -> ExecutionRecord:
         with self.transaction() as connection:
             current = self._require_execution(connection, execution_id)
@@ -1019,13 +1181,16 @@ class DurableStore:
                 UPDATE executions
                 SET state = ?, source_spool_path = CASE WHEN ? THEN NULL
                     ELSE source_spool_path END,
-                    completed_at = COALESCE(?, completed_at), updated_at = ?
+                    completed_at = COALESCE(?, completed_at),
+                    completion_source = COALESCE(?, completion_source),
+                    updated_at = ?
                 WHERE execution_id = ?
                 """,
                 (
                     to_state.value,
                     int(discard_source),
                     completed_at,
+                    completion_source,
                     now,
                     execution_id,
                 ),
@@ -1059,17 +1224,27 @@ class DurableStore:
                 )
             self._discard_source(current.source_spool_path)
             now = self._time()
+            deadline = (
+                _timestamp(
+                    self._clock()
+                    + timedelta(seconds=current.execution_timeout_seconds)
+                )
+                if current.execution_timeout_seconds is not None
+                else None
+            )
             connection.execute(
                 """
                 UPDATE executions
                 SET state = ?, dispatch_confirmed = 1,
                     source_spool_path = NULL, started_at = COALESCE(started_at, ?),
+                    execution_deadline = COALESCE(execution_deadline, ?),
                     updated_at = ?
                 WHERE execution_id = ?
                 """,
                 (
                     ExecutionState.RUNNING.value,
                     now,
+                    deadline,
                     now,
                     execution_id,
                 ),
@@ -1084,6 +1259,249 @@ class DurableStore:
                 created_at=now,
             )
         return self.get_execution(execution_id)
+
+    def record_execution_evidence(
+        self,
+        execution_id: str,
+        *,
+        reply_received: bool = False,
+        idle_received: bool = False,
+        reply_status: str | None = None,
+        error_name: str | None = None,
+        error_value: str | None = None,
+        traceback: list[str] | None = None,
+    ) -> ExecutionRecord:
+        if reply_status is not None and reply_status not in {
+            "ok",
+            "error",
+            "aborted",
+        }:
+            raise ValueError("invalid execute reply status")
+        traceback_json = (
+            json.dumps(traceback, ensure_ascii=False, separators=(",", ":"))
+            if traceback is not None
+            else None
+        )
+        with self.transaction() as connection:
+            current = self._require_execution(connection, execution_id)
+            if current.state not in {
+                ExecutionState.RUNNING,
+                ExecutionState.DISCONNECTED,
+            }:
+                raise api_error(
+                    "INVALID_EXECUTION_EVIDENCE",
+                    f"Cannot record proof in {current.state.value}",
+                    exit_code=ExitCode.CONFLICT,
+                    retryable=False,
+                    suggested_action="refresh_execution_status",
+                )
+            connection.execute(
+                """
+                UPDATE executions
+                SET reply_received = CASE WHEN ? THEN 1 ELSE reply_received END,
+                    idle_received = CASE WHEN ? THEN 1 ELSE idle_received END,
+                    reply_status = COALESCE(?, reply_status),
+                    error_name = COALESCE(?, error_name),
+                    error_value = COALESCE(?, error_value),
+                    traceback_json = COALESCE(?, traceback_json),
+                    updated_at = ?
+                WHERE execution_id = ?
+                """,
+                (
+                    int(reply_received),
+                    int(idle_received),
+                    reply_status,
+                    error_name,
+                    error_value,
+                    traceback_json,
+                    self._time(),
+                    execution_id,
+                ),
+            )
+        return self.get_execution(execution_id)
+
+    def mark_output_incomplete(self, execution_id: str) -> ExecutionRecord:
+        with self.transaction() as connection:
+            self._require_execution(connection, execution_id)
+            connection.execute(
+                """
+                UPDATE executions SET output_complete = 0, updated_at = ?
+                WHERE execution_id = ?
+                """,
+                (self._time(), execution_id),
+            )
+        return self.get_execution(execution_id)
+
+    def request_execution_cancel(self, execution_id: str) -> ExecutionRecord:
+        with self.transaction() as connection:
+            current = self._require_execution(connection, execution_id)
+            if current.state in TERMINAL_STATES:
+                return current
+            now = self._time()
+            if current.state is ExecutionState.QUEUED:
+                self._discard_source(current.source_spool_path)
+                connection.execute(
+                    """
+                    UPDATE executions
+                    SET state = ?, cancel_requested = 1,
+                        interrupt_requested_state = ?,
+                        source_spool_path = NULL, completion_source = ?,
+                        completed_at = ?, updated_at = ?
+                    WHERE execution_id = ?
+                    """,
+                    (
+                        ExecutionState.INTERRUPTED.value,
+                        ExecutionState.INTERRUPTED.value,
+                        "live",
+                        now,
+                        now,
+                        execution_id,
+                    ),
+                )
+                self._insert_transition(
+                    connection,
+                    execution_id,
+                    ExecutionState.QUEUED,
+                    ExecutionState.INTERRUPTED,
+                    reason="cancelled_while_queued",
+                    created_at=now,
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE executions
+                    SET cancel_requested = 1, interrupt_requested_state = ?,
+                        updated_at = ?
+                    WHERE execution_id = ?
+                    """,
+                    (
+                        ExecutionState.INTERRUPTED.value,
+                        now,
+                        execution_id,
+                    ),
+                )
+        return self.get_execution(execution_id)
+
+    def request_execution_timeout(self, execution_id: str) -> ExecutionRecord:
+        with self.transaction() as connection:
+            current = self._require_execution(connection, execution_id)
+            if current.state not in {
+                ExecutionState.RUNNING,
+                ExecutionState.DISCONNECTED,
+            }:
+                return current
+            connection.execute(
+                """
+                UPDATE executions
+                SET interrupt_requested_state = ?, updated_at = ?
+                WHERE execution_id = ?
+                """,
+                (
+                    ExecutionState.TIMED_OUT.value,
+                    self._time(),
+                    execution_id,
+                ),
+            )
+        return self.get_execution(execution_id)
+
+    def append_output_event(
+        self,
+        execution_id: str,
+        event: dict[str, Any],
+    ) -> int:
+        event_type = str(event.get("event_type") or "")
+        if not event_type:
+            raise ValueError("output event_type is required")
+        metadata = json.dumps(
+            event,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        with self.transaction() as connection:
+            self._require_execution(connection, execution_id)
+            row = connection.execute(
+                """
+                SELECT COALESCE(MAX(sequence), -1) + 1 AS sequence
+                FROM output_chunks WHERE execution_id = ?
+                """,
+                (execution_id,),
+            ).fetchone()
+            sequence = int(row["sequence"])
+            connection.execute(
+                """
+                INSERT INTO output_chunks (
+                    execution_id, sequence, event_type, stream_name,
+                    mime_type, display_id, metadata_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    execution_id,
+                    sequence,
+                    event_type,
+                    event.get("stream"),
+                    event.get("mime_type"),
+                    event.get("display_id"),
+                    metadata,
+                    self._time(),
+                ),
+            )
+        return sequence
+
+    def list_output_events(self, execution_id: str) -> list[dict[str, Any]]:
+        if self.get_execution(execution_id) is None:
+            raise api_error(
+                "EXECUTION_NOT_FOUND",
+                f"Execution not found: {execution_id}",
+                exit_code=ExitCode.NOT_FOUND,
+                retryable=False,
+                suggested_action="list_executions",
+            )
+        rows = self.connection.execute(
+            """
+            SELECT metadata_json FROM output_chunks
+            WHERE execution_id = ? ORDER BY sequence
+            """,
+            (execution_id,),
+        )
+        return [json.loads(row["metadata_json"]) for row in rows]
+
+    def list_executions(
+        self,
+        *,
+        session_name: str | None = None,
+    ) -> list[ExecutionRecord]:
+        parameters: list[Any] = [self.profile.profile_id]
+        session_clause = ""
+        if session_name is not None:
+            session_clause = " AND session_name = ?"
+            parameters.append(session_name)
+        rows = self.connection.execute(
+            f"""
+            SELECT execution_id FROM executions
+            WHERE profile_id = ? {session_clause}
+            ORDER BY created_at DESC, execution_id DESC
+            """,
+            parameters,
+        )
+        return [
+            self.get_execution(row["execution_id"])
+            for row in rows
+        ]
+
+    def list_queued_executions(self) -> list[ExecutionRecord]:
+        rows = self.connection.execute(
+            """
+            SELECT execution_id FROM executions
+            WHERE profile_id = ? AND state = ?
+            ORDER BY queued_at, execution_id
+            """,
+            (self.profile.profile_id, ExecutionState.QUEUED.value),
+        )
+        return [
+            self.get_execution(row["execution_id"])
+            for row in rows
+        ]
 
     def list_transitions(self, execution_id: str) -> list[ExecutionTransition]:
         rows = self.connection.execute(

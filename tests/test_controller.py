@@ -224,6 +224,13 @@ def test_normal_stop_refuses_active_work_and_force_journals_unknown(
 ):
     profile = _profile(tmp_path, "oauth2")
     store = DurableStore(paths=controller_paths, profile=profile)
+    store.upsert_session(
+        name="training",
+        endpoint="endpoint",
+        backend_url="https://runtime.example",
+        runtime_token="secret",
+        hardware="CPU",
+    )
     execution = store.create_execution(
         execution_id="00000000-0000-4000-8000-000000000100",
         session_name="training",

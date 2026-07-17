@@ -4,6 +4,8 @@ status: implemented
 last_updated: 2026-07-17
 change_log:
   - date: 2026-07-17
+    summary: Migrated to schema version 2 for execution timeout, interrupt intent, and reply-status evidence used by durable kernel workers.
+  - date: 2026-07-17
     summary: Added schema migration, profile isolation, one-time legacy import, durable transition records, protected source spools, batches, artifacts, and confirmed pruning.
 ---
 
@@ -12,7 +14,7 @@ change_log:
 Better Colab's authoritative local state is
 `${XDG_STATE_HOME:-~/.local/state}/better-colab/controller.sqlite3`. The
 database uses WAL, foreign keys, a 5000 ms busy timeout, `synchronous=FULL`,
-explicit `BEGIN IMMEDIATE` transactions, and `PRAGMA user_version=1`.
+explicit `BEGIN IMMEDIATE` transactions, and `PRAGMA user_version=2`.
 
 The database and payload files are mode `0600`. Better Colab's state, artifact,
 source, output, and runtime directories are mode `0700`. The fallback Unix
@@ -21,7 +23,7 @@ runtime directory is `$TMPDIR/better-colab-$UID`; when available,
 
 ## Schema
 
-Version 1 creates:
+Version 1 creates the core tables:
 
 - `profiles` for normalized configuration/auth namespaces and import evidence;
 - `sessions` for current endpoint, protected token, kernel/session identity,
@@ -32,6 +34,11 @@ Version 1 creates:
 - `execution_batches` and ordered `batch_members`;
 - ordered `output_chunks` and immutable `artifacts`;
 - `kernel_connections` for connection and readiness-probe identity/evidence.
+
+Migration 2 adds the requested execution-timeout duration, persisted interrupt
+terminal intent, and validated execute-reply status. New databases apply the
+same ordered migrations as existing databases rather than maintaining a
+separate creation schema.
 
 Session deletion does not own or cascade execution history. Execution pruning
 does cascade its journal, output index, batch membership, and artifact

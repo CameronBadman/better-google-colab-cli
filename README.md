@@ -107,6 +107,23 @@ better-colab controller stop --format json
 Normal stop refuses active durable work. `controller stop --force` is an
 explicit recovery action that records affected work as uncertain.
 
+Durable execution snapshots source before queueing, never allocates a runtime,
+and waits for matching Jupyter reply plus idle proof:
+
+```bash
+better-colab new -s demo
+printf 'print("durable")\n' |
+  better-colab execution start \
+    --session demo \
+    --idempotency-key example-1 \
+    --format json
+better-colab stop -s demo
+```
+
+Use `--detach` to return after queueing, then pass the returned execution UUID
+to `execution status` or `execution wait`. `--wait-timeout`/`wait --timeout`
+only bound the caller and exit 124 without cancelling remote work.
+
 ## Documentation
 
 - [Agent-first architecture and public contracts](DESIGN.md)
@@ -119,6 +136,7 @@ explicit recovery action that records affected work as uncertain.
 - [JSON v1 and typed Python API](docs/06_json_and_typed_api.md)
 - [Durable SQLite state](docs/07_durable_state.md)
 - [Local controller and startup election](docs/08_controller.md)
+- [Durable execution lifecycle](docs/09_execution_lifecycle.md)
 
 ## Contributing
 

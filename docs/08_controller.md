@@ -4,6 +4,8 @@ status: implemented
 last_updated: 2026-07-17
 change_log:
   - date: 2026-07-17
+    summary: Added execution RPCs, persistent per-kernel blocking workers/FIFOs, thread-safe condition publication, queued-work resume, and queued-work stop protection.
+  - date: 2026-07-17
     summary: Added the framed Unix protocol, single-instance locks, detached autostart, profile RPCs, condition waits, lifecycle commands, and forced-stop reconciliation.
 ---
 
@@ -46,9 +48,10 @@ request ID and contain either `result` or a stable error. A mismatch never
 causes automatic controller replacement.
 
 Implemented methods cover handshake/status, profile registration/session
-listing, condition wait/notification, and controller stop. Profile RPCs accept
-the normalized config/auth/OAuth inputs and filter every response to that
-profile. Tokens and backend URLs are never returned.
+listing, execution start/status/wait/output/cancel/list, condition
+wait/notification, and controller stop. Profile RPCs accept the normalized
+config/auth/OAuth inputs and filter every response to that profile. Tokens and
+backend URLs are never returned.
 
 ## Waits
 
@@ -58,16 +61,34 @@ on `asyncio.Condition.wait_for`. Notification increments the revision, stores
 the bounded payload, and wakes waiters. Timeout returns one response with
 `wait_timed_out:true`; it does not mutate any durable record.
 
-This mechanism is the foundation for execution and batch waits. It avoids
-repeated CLI processes, socket round trips, and database status polling.
+Execution workers publish every durable change onto a profile/execution topic.
+An execution wait checks state while holding that topic's condition, then
+releases the condition only inside `wait`; this closes the lost-wakeup window
+without database polling. The same mechanism is the foundation for batch
+waits.
+
+## Kernel workers
+
+The controller owns one persistent transport and blocking worker thread per
+profile/session kernel. Each worker is the sole consumer of the pinned
+client's shell and IOPub queues and drains a FIFO. Different session workers
+run concurrently. The asyncio server remains responsive while remote
+connection, execution, and interrupt calls block in their owner threads.
+
+The worker publishes state back to the event loop with
+`call_soon_threadsafe`; controller wait responses are therefore server-pushed.
+Controller startup submits only durably safe queued work. Already-dispatched
+restart reconciliation is deliberately proof-driven and belongs to the
+recovery milestone.
 
 ## Lifecycle safety
 
 `better-colab controller status` is passive. `controller start` performs
 election/autostart. `controller stop` waits for socket shutdown.
 
-Normal stop refuses when durable state contains `dispatching`, `running`, or
-`disconnected` work. `--force` first sets `output_complete=false` and journals
+Normal stop refuses when durable state contains `created`, `queued`,
+`dispatching`, `running`, or `disconnected` work. `--force` first sets
+`output_complete=false` and journals
 affected work to `unknown`. A running record passes through `disconnected` so
 the public state graph remains valid. Only then does the server close its
 listener, clients, database connection, PID file, socket, and lifetime lock.

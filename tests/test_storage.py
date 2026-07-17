@@ -34,6 +34,13 @@ def profile(tmp_path):
 @pytest.fixture
 def store(paths, profile):
     value = DurableStore(paths=paths, profile=profile)
+    value.upsert_session(
+        name="training",
+        endpoint="endpoint-one",
+        backend_url="https://runtime.example",
+        runtime_token="secret",
+        hardware="CPU",
+    )
     yield value
     value.close()
 
@@ -84,7 +91,7 @@ def test_database_schema_pragmas_and_private_modes(store, paths):
         "foreign_keys": 1,
         "busy_timeout": 5000,
         "synchronous": 2,
-        "user_version": 1,
+        "user_version": 2,
     }
     assert {
         "profiles",

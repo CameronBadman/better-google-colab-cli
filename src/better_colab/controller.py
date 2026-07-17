@@ -5,9 +5,15 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import hashlib
+import json
+import logging
+import math
 import os
 import signal
 import sys
+import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,8 +28,23 @@ from better_colab.controller_protocol import (
     write_frame,
 )
 from better_colab.errors import BetterColabError, ExitCode, api_error
-from better_colab.protocol import INTERNAL_PROTOCOL_VERSION
-from better_colab.storage import DurableStore, ProfileSpec, StatePaths
+from better_colab.execution import ExecutionCoordinator, TransportFactory
+from better_colab.protocol import (
+    DEFAULT_EXECUTION_LIMIT,
+    DEFAULT_OUTPUT_PAGE_BYTES,
+    INTERNAL_PROTOCOL_VERSION,
+    MAX_COLLECTION_LIMIT,
+    MAX_RESPONSE_BYTES,
+    decode_cursor,
+    encode_cursor,
+)
+from better_colab.storage import (
+    TERMINAL_STATES,
+    DurableStore,
+    ExecutionRecord,
+    ProfileSpec,
+    StatePaths,
+)
 
 
 def _timestamp() -> str:
@@ -38,7 +59,12 @@ class _Topic:
 
 
 class ControllerServer:
-    def __init__(self, *, paths: StatePaths):
+    def __init__(
+        self,
+        *,
+        paths: StatePaths,
+        transport_factory: TransportFactory | None = None,
+    ):
         self.paths = paths
         self.started_at = _timestamp()
         self._server: asyncio.AbstractServer | None = None
@@ -48,6 +74,9 @@ class ControllerServer:
         self._topics: dict[str, _Topic] = {}
         self._lifetime_lock = filelock.FileLock(str(paths.lifetime_lock))
         self._metadata_store: DurableStore | None = None
+        self._transport_factory = transport_factory
+        self._coordinator: ExecutionCoordinator | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     def _default_profile(self) -> ProfileSpec:
         return ProfileSpec.from_values(
@@ -57,6 +86,7 @@ class ControllerServer:
         )
 
     async def start(self) -> None:
+        self._loop = asyncio.get_running_loop()
         self.paths.ensure()
         try:
             self._lifetime_lock.acquire(timeout=0)
@@ -73,12 +103,20 @@ class ControllerServer:
             paths=self.paths,
             profile=self._default_profile(),
         )
+        coordinator_kwargs: dict[str, Any] = {
+            "paths": self.paths,
+            "notify": self._notify_from_worker,
+        }
+        if self._transport_factory is not None:
+            coordinator_kwargs["transport_factory"] = self._transport_factory
+        self._coordinator = ExecutionCoordinator(**coordinator_kwargs)
         self._server = await asyncio.start_unix_server(
             self._handle_connection,
             path=str(self.paths.socket),
         )
         self.paths.socket.chmod(0o600)
         self._write_pid()
+        self._resume_queued()
 
     def _write_pid(self) -> None:
         descriptor = os.open(
@@ -111,6 +149,9 @@ class ControllerServer:
             with contextlib.suppress(Exception):
                 await writer.wait_closed()
         self._writers.clear()
+        if self._coordinator is not None:
+            self._coordinator.close()
+            self._coordinator = None
         if self._metadata_store is not None:
             self._metadata_store.close()
             self._metadata_store = None
@@ -160,6 +201,7 @@ class ControllerServer:
                 except BetterColabError as error:
                     frame = self._error_response(request_id, error)
                 except Exception:
+                    logging.exception("Controller request failed")
                     frame = self._error_response(
                         request_id,
                         api_error(
@@ -258,6 +300,18 @@ class ControllerServer:
                         for session in store.list_sessions()
                     ]
                 }
+        if method == "execution.start":
+            return self._start_execution(params)
+        if method == "execution.status":
+            return self._execution_status(params)
+        if method == "execution.wait":
+            return await self._wait_execution(params)
+        if method == "execution.output":
+            return self._execution_output(params)
+        if method == "execution.cancel":
+            return self._cancel_execution(params)
+        if method == "execution.list":
+            return self._list_executions(params)
         if method == "condition.wait":
             return await self._wait_condition(params)
         if method == "condition.notify":
@@ -314,6 +368,520 @@ class ControllerServer:
             auth_provider=str(profile.get("auth_provider") or "oauth2"),
             oauth_config_path=profile.get("oauth_config_path"),
         )
+
+    @staticmethod
+    def _execution_id(params: dict[str, Any]) -> str:
+        execution_id = params.get("execution_id")
+        try:
+            parsed = uuid.UUID(str(execution_id))
+        except (ValueError, TypeError, AttributeError) as error:
+            raise api_error(
+                "INVALID_EXECUTION_ID",
+                "execution_id must be a UUID",
+                exit_code=ExitCode.USAGE,
+                retryable=False,
+                suggested_action="use_an_execution_uuid",
+            ) from error
+        return str(parsed)
+
+    def _start_execution(self, params: dict[str, Any]) -> dict[str, Any]:
+        profile = self._profile_from_params(params)
+        execution_id = self._execution_id(params)
+        session_name = params.get("session")
+        source = params.get("source")
+        provenance = params.get("provenance")
+        if not isinstance(session_name, str) or not session_name:
+            raise api_error(
+                "SESSION_REQUIRED",
+                "session is required",
+                exit_code=ExitCode.USAGE,
+                retryable=False,
+                suggested_action="specify_session",
+            )
+        if not isinstance(source, str):
+            raise api_error(
+                "SOURCE_REQUIRED",
+                "UTF-8 source text is required",
+                exit_code=ExitCode.USAGE,
+                retryable=False,
+                suggested_action="provide_source",
+            )
+        if not isinstance(provenance, dict):
+            raise api_error(
+                "PROVENANCE_REQUIRED",
+                "source provenance is required",
+                exit_code=ExitCode.USAGE,
+                retryable=False,
+                suggested_action="provide_source_provenance",
+            )
+        timeout = params.get("execution_timeout")
+        if timeout is not None:
+            try:
+                timeout = float(timeout)
+            except (TypeError, ValueError) as error:
+                raise api_error(
+                    "INVALID_EXECUTION_TIMEOUT",
+                    "execution timeout must be a finite positive number",
+                    exit_code=ExitCode.USAGE,
+                    retryable=False,
+                    suggested_action="use_a_positive_timeout",
+                ) from error
+            if not math.isfinite(timeout) or timeout <= 0:
+                raise api_error(
+                    "INVALID_EXECUTION_TIMEOUT",
+                    "execution timeout must be a finite positive number",
+                    exit_code=ExitCode.USAGE,
+                    retryable=False,
+                    suggested_action="use_a_positive_timeout",
+                )
+        idempotency_key = params.get("idempotency_key")
+        if idempotency_key is not None and (
+            not isinstance(idempotency_key, str) or not idempotency_key
+        ):
+            raise api_error(
+                "INVALID_IDEMPOTENCY_KEY",
+                "idempotency key must be a non-empty string",
+                exit_code=ExitCode.USAGE,
+                retryable=False,
+                suggested_action="use_a_nonempty_idempotency_key",
+            )
+        source_bytes = source.encode("utf-8")
+        source_hash = hashlib.sha256(source_bytes).hexdigest()
+        canonical_request = {
+            "session": session_name,
+            "source_sha256": source_hash,
+            "provenance": provenance,
+            "execution_timeout": timeout,
+        }
+        with DurableStore(paths=self.paths, profile=profile) as store:
+            record = store.create_execution(
+                execution_id=execution_id,
+                session_name=session_name,
+                source=source_bytes,
+                provenance=provenance,
+                request=canonical_request,
+                idempotency_key=idempotency_key,
+                execution_timeout_seconds=timeout,
+            )
+            result = self._execution_result(store, record, include=[])
+        assert self._coordinator is not None
+        self._coordinator.submit(profile, record.execution_id)
+        return result
+
+    def _execution_status(self, params: dict[str, Any]) -> dict[str, Any]:
+        profile = self._profile_from_params(params)
+        execution_id = self._execution_id(params)
+        include = params.get("include", [])
+        if not isinstance(include, list) or any(
+            value not in {"provenance", "transitions", "traceback"}
+            for value in include
+        ):
+            raise api_error(
+                "INVALID_INCLUDE",
+                "include supports provenance, transitions, and traceback",
+                exit_code=ExitCode.USAGE,
+                retryable=False,
+                suggested_action="use_a_named_expansion",
+            )
+        with DurableStore(paths=self.paths, profile=profile) as store:
+            record = self._require_execution(store, execution_id)
+            return self._execution_result(store, record, include=include)
+
+    async def _wait_execution(self, params: dict[str, Any]) -> dict[str, Any]:
+        profile = self._profile_from_params(params)
+        execution_id = self._execution_id(params)
+        timeout = params.get("timeout")
+        if timeout is not None:
+            try:
+                timeout = float(timeout)
+            except (TypeError, ValueError) as error:
+                raise api_error(
+                    "INVALID_WAIT_TIMEOUT",
+                    "wait timeout must be a finite non-negative number",
+                    exit_code=ExitCode.USAGE,
+                    retryable=False,
+                    suggested_action="use_a_nonnegative_timeout",
+                ) from error
+            if not math.isfinite(timeout) or timeout < 0:
+                raise api_error(
+                    "INVALID_WAIT_TIMEOUT",
+                    "wait timeout must be a finite non-negative number",
+                    exit_code=ExitCode.USAGE,
+                    retryable=False,
+                    suggested_action="use_a_nonnegative_timeout",
+                )
+        deadline = None if timeout is None else time.monotonic() + timeout
+        topic = self._topic(self._execution_topic(profile, execution_id))
+        timed_out = False
+        async with topic.condition:
+            while True:
+                with DurableStore(paths=self.paths, profile=profile) as store:
+                    record = self._require_execution(store, execution_id)
+                    if record.state in TERMINAL_STATES:
+                        result = self._execution_result(
+                            store,
+                            record,
+                            include=[],
+                        )
+                        result["wait_timed_out"] = False
+                        result["output"] = self._output_page(
+                            store,
+                            record,
+                            cursor=params.get("cursor"),
+                            max_bytes=params.get(
+                                "max_bytes", DEFAULT_OUTPUT_PAGE_BYTES
+                            ),
+                        )
+                        return result
+                remaining = (
+                    None
+                    if deadline is None
+                    else max(0.0, deadline - time.monotonic())
+                )
+                if remaining == 0:
+                    timed_out = True
+                    break
+                try:
+                    await asyncio.wait_for(
+                        topic.condition.wait(),
+                        timeout=remaining,
+                    )
+                except TimeoutError:
+                    timed_out = True
+                    break
+
+        with DurableStore(paths=self.paths, profile=profile) as store:
+            record = self._require_execution(store, execution_id)
+            result = self._execution_result(store, record, include=[])
+            result["wait_timed_out"] = timed_out
+            result["output"] = self._output_page(
+                store,
+                record,
+                cursor=params.get("cursor"),
+                max_bytes=params.get("max_bytes", DEFAULT_OUTPUT_PAGE_BYTES),
+            )
+            return result
+
+    def _execution_output(self, params: dict[str, Any]) -> dict[str, Any]:
+        profile = self._profile_from_params(params)
+        execution_id = self._execution_id(params)
+        with DurableStore(paths=self.paths, profile=profile) as store:
+            record = self._require_execution(store, execution_id)
+            return self._output_page(
+                store,
+                record,
+                cursor=params.get("cursor"),
+                max_bytes=params.get("max_bytes", DEFAULT_OUTPUT_PAGE_BYTES),
+            )
+
+    def _cancel_execution(self, params: dict[str, Any]) -> dict[str, Any]:
+        profile = self._profile_from_params(params)
+        execution_id = self._execution_id(params)
+        assert self._coordinator is not None
+        record = self._coordinator.cancel(profile, execution_id)
+        with DurableStore(paths=self.paths, profile=profile) as store:
+            return self._execution_result(store, record, include=[])
+
+    def _list_executions(self, params: dict[str, Any]) -> dict[str, Any]:
+        profile = self._profile_from_params(params)
+        session_name = params.get("session")
+        if session_name is not None and not isinstance(session_name, str):
+            raise api_error(
+                "INVALID_SESSION",
+                "session filter must be a string",
+                exit_code=ExitCode.USAGE,
+                retryable=False,
+                suggested_action="use_a_session_name",
+            )
+        try:
+            limit = int(params.get("limit", DEFAULT_EXECUTION_LIMIT))
+        except (TypeError, ValueError) as error:
+            raise api_error(
+                "INVALID_LIMIT",
+                "limit must be an integer",
+                exit_code=ExitCode.USAGE,
+                retryable=False,
+                suggested_action="use_a_supported_limit",
+            ) from error
+        if limit < 1 or limit > MAX_COLLECTION_LIMIT:
+            raise api_error(
+                "INVALID_LIMIT",
+                f"limit must be between 1 and {MAX_COLLECTION_LIMIT}",
+                exit_code=ExitCode.USAGE,
+                retryable=False,
+                suggested_action="use_a_supported_limit",
+            )
+        try:
+            offset = decode_cursor(params.get("cursor"))
+        except ValueError as error:
+            raise api_error(
+                "INVALID_CURSOR",
+                "invalid execution cursor",
+                exit_code=ExitCode.USAGE,
+                retryable=False,
+                suggested_action="restart_pagination",
+            ) from error
+        with DurableStore(paths=self.paths, profile=profile) as store:
+            records = store.list_executions(session_name=session_name)
+            if offset > len(records):
+                raise api_error(
+                    "INVALID_CURSOR",
+                    "execution cursor is beyond the collection",
+                    exit_code=ExitCode.USAGE,
+                    retryable=False,
+                    suggested_action="restart_pagination",
+                )
+            selected = records[offset : offset + limit]
+            next_offset = offset + len(selected)
+            result = {
+                "executions": [
+                    self._execution_result(store, record, include=[])
+                    for record in selected
+                ]
+            }
+            if next_offset < len(records):
+                result["next_cursor"] = encode_cursor(next_offset)
+            return result
+
+    @staticmethod
+    def _require_execution(
+        store: DurableStore,
+        execution_id: str,
+    ) -> ExecutionRecord:
+        record = store.get_execution(execution_id)
+        if record is None:
+            raise api_error(
+                "EXECUTION_NOT_FOUND",
+                f"Execution not found: {execution_id}",
+                exit_code=ExitCode.NOT_FOUND,
+                retryable=False,
+                suggested_action="list_executions",
+            )
+        return record
+
+    def _execution_result(
+        self,
+        store: DurableStore,
+        record: ExecutionRecord,
+        *,
+        include: list[str],
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "execution_id": record.execution_id,
+            "session": record.session_name,
+            "state": record.state.value,
+            "source_sha256": record.source_sha256,
+            "output_complete": record.output_complete,
+            "dispatch_confirmed": record.dispatch_confirmed,
+            "reply_received": record.reply_received,
+            "idle_received": record.idle_received,
+            "created_at": record.created_at,
+            "updated_at": record.updated_at,
+        }
+        optional = {
+            "started_at": record.started_at,
+            "completed_at": record.completed_at,
+            "execution_deadline": record.execution_deadline,
+            "idempotency_key": record.idempotency_key,
+            "completion_source": record.completion_source,
+            "error_name": record.error_name,
+            "error_value": record.error_value,
+        }
+        result.update(
+            {key: value for key, value in optional.items() if value is not None}
+        )
+        if "provenance" in include:
+            provenance = {
+                "kind": record.source_kind,
+                "sha256": record.source_sha256,
+            }
+            provenance_optional = {
+                "path": record.source_path,
+                "notebook_id": record.notebook_id,
+                "cell_id": record.cell_id,
+                "cell_index": record.cell_index,
+            }
+            provenance.update(
+                {
+                    key: value
+                    for key, value in provenance_optional.items()
+                    if value is not None
+                }
+            )
+            result["provenance"] = provenance
+        if "transitions" in include:
+            result["transitions"] = [
+                {
+                    "from_state": (
+                        transition.from_state.value
+                        if transition.from_state is not None
+                        else None
+                    ),
+                    "to_state": transition.to_state.value,
+                    "reason": transition.reason,
+                    "evidence": transition.evidence,
+                    "created_at": transition.created_at,
+                }
+                for transition in store.list_transitions(record.execution_id)
+            ]
+        if "traceback" in include and record.traceback_json:
+            result["traceback"] = json.loads(record.traceback_json)
+        return result
+
+    def _output_page(
+        self,
+        store: DurableStore,
+        record: ExecutionRecord,
+        *,
+        cursor: Any,
+        max_bytes: Any,
+    ) -> dict[str, Any]:
+        try:
+            budget = int(max_bytes)
+        except (TypeError, ValueError) as error:
+            raise api_error(
+                "INVALID_MAX_BYTES",
+                "max_bytes must be an integer",
+                exit_code=ExitCode.USAGE,
+                retryable=False,
+                suggested_action="use_a_positive_byte_budget",
+            ) from error
+        if budget < 1 or budget > MAX_RESPONSE_BYTES // 2:
+            raise api_error(
+                "INVALID_MAX_BYTES",
+                f"max_bytes must be between 1 and {MAX_RESPONSE_BYTES // 2}",
+                exit_code=ExitCode.USAGE,
+                retryable=False,
+                suggested_action="use_a_supported_byte_budget",
+            )
+        try:
+            offset = decode_cursor(cursor)
+        except ValueError as error:
+            raise api_error(
+                "INVALID_CURSOR",
+                "invalid output cursor",
+                exit_code=ExitCode.USAGE,
+                retryable=False,
+                suggested_action="restart_output_read",
+            ) from error
+        raw_events = store.list_output_events(record.execution_id)
+        if offset > len(raw_events):
+            raise api_error(
+                "INVALID_CURSOR",
+                "output cursor is beyond the execution output",
+                exit_code=ExitCode.USAGE,
+                retryable=False,
+                suggested_action="restart_output_read",
+            )
+        events: list[dict[str, Any]] = []
+        used = 0
+        next_offset = offset
+        for index, event in enumerate(raw_events[offset:], start=offset):
+            public = self._public_output_event(index, event)
+            encoded_size = len(
+                json.dumps(
+                    public,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+            if events and used + encoded_size > budget:
+                break
+            if not events and encoded_size > budget:
+                # Milestone 6 promotes oversized values to artifacts. Until
+                # then, expose a bounded prefix without advancing past bytes
+                # the caller has not seen.
+                text = public.get("text")
+                if isinstance(text, str):
+                    prefix = text.encode("utf-8")[: max(1, budget // 2)]
+                    while True:
+                        try:
+                            public["text"] = prefix.decode("utf-8")
+                            break
+                        except UnicodeDecodeError:
+                            prefix = prefix[:-1]
+                public["truncated"] = True
+            events.append(public)
+            used += min(encoded_size, budget)
+            next_offset = index + 1
+            if used >= budget:
+                break
+        has_more = next_offset < len(raw_events)
+        result: dict[str, Any] = {
+            "execution_id": record.execution_id,
+            "events": events,
+            "has_more": has_more,
+            "output_complete": record.output_complete,
+        }
+        if has_more:
+            result["next_cursor"] = encode_cursor(next_offset)
+        return result
+
+    @staticmethod
+    def _public_output_event(
+        index: int,
+        event: dict[str, Any],
+    ) -> dict[str, Any]:
+        event_type = str(event.get("event_type") or "unknown")
+        result: dict[str, Any] = {
+            "cursor": encode_cursor(index),
+            "event_type": event_type,
+        }
+        if event_type == "stream":
+            result["stream"] = str(event.get("stream") or "stdout")
+            result["text"] = str(event.get("text") or "")
+        elif event_type == "error":
+            traceback = event.get("traceback")
+            result["text"] = "\n".join(traceback or [])
+        elif event_type in {"display_data", "execute_result"}:
+            data = event.get("data")
+            if isinstance(data, dict) and "text/plain" in data:
+                result["mime_type"] = "text/plain"
+                result["text"] = str(data["text/plain"])
+        return result
+
+    @staticmethod
+    def _execution_topic(profile: ProfileSpec, execution_id: str) -> str:
+        return f"execution:{profile.profile_id}:{execution_id}"
+
+    def _notify_from_worker(
+        self,
+        profile: ProfileSpec,
+        execution_id: str,
+    ) -> None:
+        if self._loop is None or self._loop.is_closed():
+            return
+        self._loop.call_soon_threadsafe(
+            lambda: asyncio.create_task(
+                self._publish_execution(profile, execution_id)
+            )
+        )
+
+    async def _publish_execution(
+        self,
+        profile: ProfileSpec,
+        execution_id: str,
+    ) -> None:
+        topic = self._topic(self._execution_topic(profile, execution_id))
+        with DurableStore(paths=self.paths, profile=profile) as store:
+            record = store.get_execution(execution_id)
+            payload = (
+                self._execution_result(store, record, include=[])
+                if record is not None
+                else None
+            )
+        async with topic.condition:
+            topic.revision += 1
+            topic.payload = payload
+            topic.condition.notify_all()
+
+    def _resume_queued(self) -> None:
+        assert self._coordinator is not None
+        for profile in self._profile_specs():
+            with DurableStore(paths=self.paths, profile=profile) as store:
+                queued = store.list_queued_executions()
+            for record in queued:
+                self._coordinator.submit(profile, record.execution_id)
 
     def _topic(self, name: str) -> _Topic:
         topic = self._topics.get(name)
@@ -395,7 +963,8 @@ class ControllerServer:
         return self._metadata_store.connection.execute(
             """
             SELECT COUNT(*) FROM executions
-            WHERE state IN ('dispatching', 'running', 'disconnected')
+            WHERE state IN ('created', 'queued', 'dispatching', 'running',
+                            'disconnected')
             """
         ).fetchone()[0]
 

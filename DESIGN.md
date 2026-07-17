@@ -5,6 +5,8 @@ schema_version: 1
 last_updated: 2026-07-17
 change_log:
   - date: 2026-07-17
+    summary: Implemented persistent per-kernel execution workers, exact-once dispatch, matching reply/idle proof, idempotent typed/CLI operations, condition waits, verified cancellation/deadlines, and a live CPU integration suite.
+  - date: 2026-07-17
     summary: Implemented the single-instance Unix controller, framed protocol, startup election, condition waits, profile routing, explicit lifecycle commands, and forced-stop uncertainty.
   - date: 2026-07-17
     summary: Added schema-v1 SQLite durability, profile-isolated legacy import, protected queued-source spools, transition validation, batches, artifacts, and explicit terminal pruning.
@@ -81,11 +83,11 @@ installer output, omits protected runtime tokens, and routes errors through
 the same stable envelope and exit-code mapping.
 
 The typed Python layer returns the same public models without importing Typer,
-Rich, or terminal rendering. `BetterColabClient.capabilities()` and
-`BetterColabClient.doctor()` are the first implemented operations; durable
-session/execution/notebook methods are added with their corresponding
-controller milestones. `execution start` never allocates a runtime:
-`session ensure` is the only compound operation allowed to allocate.
+Rich, or terminal rendering. `BetterColabClient` implements capabilities,
+doctor, controller lifecycle, pruning, and durable execution
+start/status/wait/output/cancel/list. Durable session and notebook methods are
+added with their corresponding milestones. `execution start` never allocates
+a runtime: `session ensure` is the only compound operation allowed to allocate.
 
 ## Controller
 
@@ -122,15 +124,17 @@ version mismatch is returned as a conflict and never triggers replacement of a
 healthy controller.
 
 Controller condition waits hold one request open on an `asyncio.Condition`.
-Notifications increment a topic revision and wake all interested requests, so
-future execution waits do not poll SQLite or controller status. Profile
+Worker threads publish durable transitions into the event loop and wake all
+interested requests, so execution waits do not poll SQLite or controller
+status. Profile
 parameters are canonicalized at the controller boundary, and session listings
 exclude runtime URLs/tokens.
 
 `better-colab controller start|status|stop` provides explicit lifecycle
 control. Status is a passive observation and never autostarts. Normal stop
-returns `CONTROLLER_BUSY` when any record is `dispatching`, `running`, or
-`disconnected`. Forced stop makes output incomplete and journals running work
+returns `CONTROLLER_BUSY` when any record is `created`, `queued`,
+`dispatching`, `running`, or `disconnected`. Forced stop makes output
+incomplete and journals running work
 through `disconnected -> unknown` (or ambiguous dispatch directly to
 `unknown`) before closing the socket.
 
@@ -142,7 +146,9 @@ stored at `${XDG_STATE_HOME:-~/.local/state}/better-colab/controller.sqlite3`;
 protected output/source spools and immutable artifacts are siblings under
 `artifacts/`.
 
-Schema version 1 is implemented in `better_colab.storage`. The database and
+Schema version 2 is implemented in `better_colab.storage`. Version 1 creates
+the core tables; migration 2 adds execution-timeout duration, interrupt intent,
+and validated reply-status evidence. The database and
 payload files are mode `0600`; Better Colab state, artifact, source, output,
 and runtime directories are mode `0700`. The store pre-creates the database
 with restrictive permissions before SQLite can open it. A newer unknown
@@ -213,6 +219,14 @@ existing execution; different reuse returns `IDEMPOTENCY_CONFLICT`. A wait
 timeout is observational, exits 124, and never mutates or cancels work.
 Execution deadlines begin only after confirmed running and become `timed_out`
 only after a verified interrupt.
+
+This lifecycle is implemented. One persistent blocking worker and FIFO owns
+each profile/session kernel, while different sessions may execute
+concurrently. `better-colab execution start|status|wait|output|cancel|list`
+and the synchronous typed equivalents share the controller contract.
+Attached execution waits indefinitely by default; detach returns after durable
+queueing. Status is always an exit-0 observation, attached terminal failures
+exit 1, and observational wait timeout exits 124 without cancellation.
 
 ## Output, notebooks, and batches
 

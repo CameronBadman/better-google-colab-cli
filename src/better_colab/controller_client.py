@@ -257,6 +257,126 @@ class ControllerClient:
         result = self.request("profile.sessions", self._profile_params(profile))
         return result["sessions"]
 
+    def start_execution(
+        self,
+        *,
+        profile: ProfileSpec,
+        execution_id: str,
+        session: str,
+        source: str,
+        provenance: dict[str, Any],
+        idempotency_key: str | None,
+        execution_timeout: float | None,
+    ) -> dict[str, Any]:
+        self.ensure_running()
+        params = self._profile_params(profile)
+        params.update(
+            {
+                "execution_id": execution_id,
+                "session": session,
+                "source": source,
+                "provenance": provenance,
+                "idempotency_key": idempotency_key,
+                "execution_timeout": execution_timeout,
+            }
+        )
+        return self.request("execution.start", params)
+
+    def execution_status(
+        self,
+        *,
+        profile: ProfileSpec,
+        execution_id: str,
+        include: list[str] | None = None,
+    ) -> dict[str, Any]:
+        self.ensure_running()
+        params = self._profile_params(profile)
+        params.update(
+            {
+                "execution_id": execution_id,
+                "include": include or [],
+            }
+        )
+        return self.request("execution.status", params)
+
+    def wait_execution(
+        self,
+        *,
+        profile: ProfileSpec,
+        execution_id: str,
+        timeout: float | None,
+        cursor: str | None,
+        max_bytes: int,
+    ) -> dict[str, Any]:
+        self.ensure_running()
+        params = self._profile_params(profile)
+        params.update(
+            {
+                "execution_id": execution_id,
+                "timeout": timeout,
+                "cursor": cursor,
+                "max_bytes": max_bytes,
+            }
+        )
+        # An indefinite public wait is implemented in bounded one-hour socket
+        # leases by the server/client pair, so a lost controller remains
+        # observable instead of looking like a permanently blocked syscall.
+        socket_timeout = (
+            max(self.connect_timeout, timeout + 1)
+            if timeout is not None
+            else max(self.connect_timeout, 3601)
+        )
+        return self.request("execution.wait", params, timeout=socket_timeout)
+
+    def execution_output(
+        self,
+        *,
+        profile: ProfileSpec,
+        execution_id: str,
+        cursor: str | None,
+        max_bytes: int,
+    ) -> dict[str, Any]:
+        self.ensure_running()
+        params = self._profile_params(profile)
+        params.update(
+            {
+                "execution_id": execution_id,
+                "cursor": cursor,
+                "max_bytes": max_bytes,
+            }
+        )
+        return self.request("execution.output", params)
+
+    def cancel_execution(
+        self,
+        *,
+        profile: ProfileSpec,
+        execution_id: str,
+    ) -> dict[str, Any]:
+        self.ensure_running()
+        params = self._profile_params(profile)
+        params["execution_id"] = execution_id
+        return self.request("execution.cancel", params)
+
+    def list_executions(
+        self,
+        *,
+        profile: ProfileSpec,
+        session: str | None,
+        cursor: str | None,
+        limit: int,
+    ) -> dict[str, Any]:
+        self.ensure_running()
+        params = self._profile_params(profile)
+        params.update(
+            {
+                "session": session,
+                "cursor": cursor,
+                "limit": limit,
+            }
+        )
+        return self.request("execution.list", params)
+
     def wait_condition(
         self,
         *,

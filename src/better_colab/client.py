@@ -2,22 +2,33 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import platform
 import sys
+import uuid
 from importlib.metadata import PackageNotFoundError, version
+from typing import Any
 
 from better_colab.capabilities import get_capabilities
 from better_colab.controller_client import ControllerClient
-from better_colab.errors import BetterColabError
+from better_colab.errors import BetterColabError, ExitCode, api_error
 from better_colab.models import (
     CapabilitiesResult,
     ControllerStatus,
     ControllerStopResult,
     DoctorResult,
+    ExecutionListResult,
+    ExecutionResult,
+    ExecutionWaitResult,
+    OutputPage,
     PruneResult,
 )
-from better_colab.protocol import DEFAULT_EXECUTION_LIMIT, SCHEMA_VERSION
+from better_colab.protocol import (
+    DEFAULT_EXECUTION_LIMIT,
+    DEFAULT_OUTPUT_PAGE_BYTES,
+    SCHEMA_VERSION,
+)
 from better_colab.storage import DurableStore, ProfileSpec, StatePaths
 
 
@@ -131,6 +142,139 @@ class BetterColabClient:
             **result,
             controller_alive=False,
         )
+
+    def start_execution(
+        self,
+        *,
+        session: str,
+        source: str | bytes,
+        provenance: dict[str, Any],
+        expected_source_sha256: str | None = None,
+        idempotency_key: str | None = None,
+        execution_timeout: float | None = None,
+        detach: bool = False,
+        wait_timeout: float | None = None,
+    ) -> ExecutionResult | ExecutionWaitResult:
+        if detach and wait_timeout is not None:
+            raise api_error(
+                "CONFLICTING_FLAGS",
+                "detach and wait_timeout are mutually exclusive",
+                exit_code=ExitCode.USAGE,
+                retryable=False,
+                suggested_action="choose_detach_or_wait_timeout",
+            )
+        if isinstance(source, bytes):
+            try:
+                source_text = source.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise api_error(
+                    "SOURCE_NOT_UTF8",
+                    "Execution source must be valid UTF-8",
+                    exit_code=ExitCode.USAGE,
+                    retryable=False,
+                    suggested_action="provide_utf8_source",
+                ) from error
+        else:
+            source_text = source
+        digest = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
+        if expected_source_sha256 is not None:
+            expected = expected_source_sha256.removeprefix("sha256:").lower()
+            if expected != digest:
+                raise api_error(
+                    "SOURCE_HASH_MISMATCH",
+                    "Source changed since it was inspected",
+                    exit_code=ExitCode.CONFLICT,
+                    retryable=False,
+                    suggested_action="reinspect_source",
+                    details={
+                        "expected": f"sha256:{expected}",
+                        "actual": f"sha256:{digest}",
+                    },
+                )
+        controller = ControllerClient(paths=self.paths)
+        queued = controller.start_execution(
+            profile=self.profile,
+            execution_id=str(uuid.uuid4()),
+            session=session,
+            source=source_text,
+            provenance=provenance,
+            idempotency_key=idempotency_key,
+            execution_timeout=execution_timeout,
+        )
+        result = ExecutionResult.model_validate(queued)
+        if detach:
+            return result
+        return self.wait_execution(
+            result.execution_id,
+            timeout=wait_timeout,
+        )
+
+    def execution_status(
+        self,
+        execution_id: str,
+        *,
+        include: list[str] | None = None,
+    ) -> ExecutionResult:
+        result = ControllerClient(paths=self.paths).execution_status(
+            profile=self.profile,
+            execution_id=execution_id,
+            include=include,
+        )
+        return ExecutionResult.model_validate(result)
+
+    def wait_execution(
+        self,
+        execution_id: str,
+        *,
+        timeout: float | None = None,
+        cursor: str | None = None,
+        max_bytes: int = DEFAULT_OUTPUT_PAGE_BYTES,
+    ) -> ExecutionWaitResult:
+        result = ControllerClient(paths=self.paths).wait_execution(
+            profile=self.profile,
+            execution_id=execution_id,
+            timeout=timeout,
+            cursor=cursor,
+            max_bytes=max_bytes,
+        )
+        return ExecutionWaitResult.model_validate(result)
+
+    def execution_output(
+        self,
+        execution_id: str,
+        *,
+        cursor: str | None = None,
+        max_bytes: int = DEFAULT_OUTPUT_PAGE_BYTES,
+    ) -> OutputPage:
+        result = ControllerClient(paths=self.paths).execution_output(
+            profile=self.profile,
+            execution_id=execution_id,
+            cursor=cursor,
+            max_bytes=max_bytes,
+        )
+        return OutputPage.model_validate(result)
+
+    def cancel_execution(self, execution_id: str) -> ExecutionResult:
+        result = ControllerClient(paths=self.paths).cancel_execution(
+            profile=self.profile,
+            execution_id=execution_id,
+        )
+        return ExecutionResult.model_validate(result)
+
+    def list_executions(
+        self,
+        *,
+        session: str | None = None,
+        cursor: str | None = None,
+        limit: int = DEFAULT_EXECUTION_LIMIT,
+    ) -> ExecutionListResult:
+        result = ControllerClient(paths=self.paths).list_executions(
+            profile=self.profile,
+            session=session,
+            cursor=cursor,
+            limit=limit,
+        )
+        return ExecutionListResult.model_validate(result)
 
     def close(self) -> None:
         if self._store is not None:

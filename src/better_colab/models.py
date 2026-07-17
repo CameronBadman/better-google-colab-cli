@@ -150,6 +150,7 @@ class OutputEvent(PublicModel):
     stream: str | None = None
     mime_type: str | None = None
     artifact: Artifact | None = None
+    truncated: bool = False
 
 
 class OutputPage(PublicModel):
@@ -172,6 +173,47 @@ class ExecutionSummary(PublicModel):
     completion_source: CompletionSource | None = None
     error_name: str | None = None
     error_value: str | None = None
+
+
+class ExecutionTransitionSummary(PublicModel):
+    from_state: ExecutionState | None = None
+    to_state: ExecutionState
+    reason: str | None = None
+    evidence: dict[str, Any] | None = None
+    created_at: str
+
+
+class ExecutionResult(PublicModel):
+    execution_id: str
+    session: str
+    state: ExecutionState
+    source_sha256: str
+    output_complete: bool
+    dispatch_confirmed: bool = False
+    reply_received: bool = False
+    idle_received: bool = False
+    created_at: str
+    updated_at: str
+    started_at: str | None = None
+    completed_at: str | None = None
+    execution_deadline: str | None = None
+    idempotency_key: str | None = None
+    completion_source: CompletionSource | None = None
+    error_name: str | None = None
+    error_value: str | None = None
+    provenance: SourceProvenance | None = None
+    transitions: list[ExecutionTransitionSummary] | None = None
+    traceback: list[str] | None = None
+
+
+class ExecutionWaitResult(ExecutionResult):
+    wait_timed_out: bool = False
+    output: OutputPage
+
+
+class ExecutionListResult(PublicModel):
+    executions: list[ExecutionResult]
+    next_cursor: str | None = None
 
 
 class NotebookCellSummary(PublicModel):

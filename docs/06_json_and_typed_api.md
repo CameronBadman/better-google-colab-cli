@@ -4,6 +4,8 @@ status: implemented
 last_updated: 2026-07-17
 change_log:
   - date: 2026-07-17
+    summary: Added typed execution start/status/wait/output/cancel/list operations and their observation-versus-attached exit behavior.
+  - date: 2026-07-17
     summary: Added schema-v1 envelopes, public models, capability pagination, response caps, doctor, and legacy JSON adapters.
 ---
 
@@ -70,6 +72,19 @@ console surfaces. Text remains their default. JSON mode:
 Interactive edit, REPL, console, VM auth, and compatibility-only Drive
 operations deliberately remain outside this adapter.
 
+## Durable execution models
+
+The synchronous client now implements execution start, status, wait, output,
+cancel, and list. `ExecutionResult`, `ExecutionWaitResult`,
+`ExecutionListResult`, and `OutputPage` are shared directly with JSON mode;
+the typed layer has no Typer, Rich, or terminal-rendering dependency.
+
+Execution status is an observation and returns normally even for `error` or
+`unknown`. Attached start/wait still returns the typed observation but the CLI
+exits 1 for a proven terminal failure. Caller wait timeout returns current
+state with `wait_timed_out=true` and the CLI exits 124; it is not an exception
+and does not request cancellation.
+
 ## Testing strategy
 
 - Invoke the CLI through Typer and parse exactly one stdout line.
@@ -79,4 +94,3 @@ operations deliberately remain outside this adapter.
 - Serialize oversized successes and errors and assert the hard cap.
 - Assert all seven health fields survive null/default omission.
 - Run retained upstream tests to protect text-mode compatibility.
-
