@@ -95,6 +95,18 @@ better-colab execution prune \
 # Re-run with --confirm only after inspecting the dry-run result.
 ```
 
+The persistent local controller autostarts for durable operations and can be
+managed explicitly:
+
+```bash
+better-colab controller status --format json
+better-colab controller start --format json
+better-colab controller stop --format json
+```
+
+Normal stop refuses active durable work. `controller stop --force` is an
+explicit recovery action that records affected work as uncertain.
+
 ## Documentation
 
 - [Agent-first architecture and public contracts](DESIGN.md)
@@ -106,6 +118,7 @@ better-colab execution prune \
 - [Upstream ephemeral runner design](docs/05_run_command.md)
 - [JSON v1 and typed Python API](docs/06_json_and_typed_api.md)
 - [Durable SQLite state](docs/07_durable_state.md)
+- [Local controller and startup election](docs/08_controller.md)
 
 ## Contributing
 

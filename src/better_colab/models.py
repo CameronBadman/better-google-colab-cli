@@ -188,3 +188,18 @@ class PruneResult(PublicModel):
     deleted: int
     execution_ids: list[str]
     artifact_bytes: int
+
+
+class ControllerStatus(PublicModel):
+    controller_alive: bool
+    pid: int | None = None
+    protocol_version: int | None = None
+    started_at: str | None = None
+    active_executions: int | None = None
+
+
+class ControllerStopResult(PublicModel):
+    stopping: bool
+    forced: bool = False
+    affected: list[str] = Field(default_factory=list)
+    controller_alive: bool

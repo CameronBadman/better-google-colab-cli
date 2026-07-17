@@ -98,6 +98,7 @@ def create_app(
         state.auth_provider = auth
         if ctx.invoked_subcommand not in {
             "capabilities",
+            "controller",
             "doctor",
             "execution",
             "notebook",

@@ -5,6 +5,8 @@ schema_version: 1
 last_updated: 2026-07-17
 change_log:
   - date: 2026-07-17
+    summary: Implemented the single-instance Unix controller, framed protocol, startup election, condition waits, profile routing, explicit lifecycle commands, and forced-stop uncertainty.
+  - date: 2026-07-17
     summary: Added schema-v1 SQLite durability, profile-isolated legacy import, protected queued-source spools, transition validation, batches, artifacts, and explicit terminal pruning.
   - date: 2026-07-17
     summary: Implemented the typed Python facade, JSON v1 envelopes, bounded capability discovery, cursor primitives, and flat-command JSON adapters.
@@ -105,6 +107,32 @@ Waits are condition-driven controller requests rather than CLI status polling.
 Normal controller stop refuses while work is active. Forced stop marks affected
 executions uncertain. Interactive legacy commands take an exclusive session
 lease and temporarily release the controller's kernel connection.
+
+The process/election/protocol foundation is implemented. Clients first attempt
+a handshake, then serialize startup through a separate mode-`0600` election
+lock. Only the election winner may remove a stale socket/PID file, and only
+after proving the lifetime lock is free. The detached child acquires that
+lifetime lock before binding, writes a mode-`0600` PID file, and remains alive
+until explicit stop or a process signal.
+
+Each internal frame is a four-byte network-order length followed by compact
+UTF-8 JSON. Frames above 16 MiB are rejected from their header before the body
+is read. Every request/response carries protocol version and request ID; a
+version mismatch is returned as a conflict and never triggers replacement of a
+healthy controller.
+
+Controller condition waits hold one request open on an `asyncio.Condition`.
+Notifications increment a topic revision and wake all interested requests, so
+future execution waits do not poll SQLite or controller status. Profile
+parameters are canonicalized at the controller boundary, and session listings
+exclude runtime URLs/tokens.
+
+`better-colab controller start|status|stop` provides explicit lifecycle
+control. Status is a passive observation and never autostarts. Normal stop
+returns `CONTROLLER_BUSY` when any record is `dispatching`, `running`, or
+`disconnected`. Forced stop makes output incomplete and journals running work
+through `disconnected -> unknown` (or ambiguous dispatch directly to
+`unknown`) before closing the socket.
 
 ## Durable state
 

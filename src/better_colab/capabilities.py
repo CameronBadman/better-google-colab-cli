@@ -55,6 +55,28 @@ COMMANDS: tuple[CommandCapability, ...] = (
         ],
     ),
     CommandCapability(
+        name="controller start",
+        summary="Elect and start the persistent per-user controller.",
+        arguments=[
+            _arg("format", "enum", default="text", choices=["text", "json"])
+        ],
+    ),
+    CommandCapability(
+        name="controller status",
+        summary="Observe controller state without starting it.",
+        arguments=[
+            _arg("format", "enum", default="text", choices=["text", "json"])
+        ],
+    ),
+    CommandCapability(
+        name="controller stop",
+        summary="Stop the controller; force records active work as uncertain.",
+        arguments=[
+            _arg("force", "boolean", default=False),
+            _arg("format", "enum", default="text", choices=["text", "json"]),
+        ],
+    ),
+    CommandCapability(
         name="doctor",
         summary="Inspect local controller and configuration health.",
         arguments=[_arg("format", "enum", default="text", choices=["text", "json"])],
@@ -296,4 +318,3 @@ def get_capabilities(
         commands=page,
         next_cursor=next_cursor,
     )
-

@@ -146,6 +146,26 @@ class StatePaths:
     def outputs_dir(self) -> Path:
         return self.artifacts_dir / "output"
 
+    @property
+    def socket(self) -> Path:
+        return self.runtime_dir / "controller.sock"
+
+    @property
+    def pid_file(self) -> Path:
+        return self.runtime_dir / "controller.pid"
+
+    @property
+    def log_file(self) -> Path:
+        return self.runtime_dir / "controller.log"
+
+    @property
+    def lifetime_lock(self) -> Path:
+        return self.runtime_dir / "controller.lock"
+
+    @property
+    def startup_lock(self) -> Path:
+        return self.runtime_dir / "startup.lock"
+
     def ensure(self) -> None:
         for directory in (
             self.state_dir,
@@ -1301,6 +1321,59 @@ class DurableStore:
             artifact_bytes=artifact_bytes,
         )
 
+    def list_active_executions(self) -> list[ExecutionRecord]:
+        rows = self.connection.execute(
+            """
+            SELECT execution_id FROM executions
+            WHERE profile_id = ?
+              AND state IN ('dispatching', 'running', 'disconnected')
+            ORDER BY execution_id
+            """,
+            (self.profile.profile_id,),
+        )
+        return [
+            self.get_execution(row["execution_id"])
+            for row in rows
+        ]
+
+    def force_uncertain_active(self, *, reason: str) -> list[str]:
+        affected: list[str] = []
+        for record in self.list_active_executions():
+            execution_id = record.execution_id
+            with self.transaction() as connection:
+                connection.execute(
+                    """
+                    UPDATE executions SET output_complete = 0, updated_at = ?
+                    WHERE execution_id = ?
+                    """,
+                    (self._time(), execution_id),
+                )
+            current = self.get_execution(execution_id)
+            if current.state is ExecutionState.RUNNING:
+                self.transition_execution(
+                    execution_id,
+                    ExecutionState.DISCONNECTED,
+                    reason=reason,
+                )
+                current = self.get_execution(execution_id)
+            if current.state in {
+                ExecutionState.DISPATCHING,
+                ExecutionState.DISCONNECTED,
+            }:
+                self.transition_execution(
+                    execution_id,
+                    ExecutionState.UNKNOWN,
+                    reason=reason,
+                )
+                affected.append(execution_id)
+        return affected
+
     def close(self) -> None:
         with self._lock:
             self.connection.close()
+
+    def __enter__(self) -> DurableStore:
+        return self
+
+    def __exit__(self, *_args) -> None:
+        self.close()

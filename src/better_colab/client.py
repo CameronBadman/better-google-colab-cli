@@ -8,7 +8,15 @@ import sys
 from importlib.metadata import PackageNotFoundError, version
 
 from better_colab.capabilities import get_capabilities
-from better_colab.models import CapabilitiesResult, DoctorResult, PruneResult
+from better_colab.controller_client import ControllerClient
+from better_colab.errors import BetterColabError
+from better_colab.models import (
+    CapabilitiesResult,
+    ControllerStatus,
+    ControllerStopResult,
+    DoctorResult,
+    PruneResult,
+)
 from better_colab.protocol import DEFAULT_EXECUTION_LIMIT, SCHEMA_VERSION
 from better_colab.storage import DurableStore, ProfileSpec, StatePaths
 
@@ -84,6 +92,44 @@ class BetterColabClient:
             before=before,
             session_name=session,
             confirm=confirm,
+        )
+
+    def controller_status(self) -> ControllerStatus:
+        controller = ControllerClient(paths=self.paths)
+        try:
+            result = controller.status()
+        except BetterColabError as error:
+            if error.error.code != "CONTROLLER_NOT_RUNNING":
+                raise
+            return ControllerStatus(controller_alive=False)
+        return ControllerStatus.model_validate(result)
+
+    def controller_start(self) -> ControllerStatus:
+        result = ControllerClient(paths=self.paths).ensure_running()
+        return ControllerStatus.model_validate(result)
+
+    def controller_stop(
+        self,
+        *,
+        force: bool = False,
+        wait_timeout: float = 3,
+    ) -> ControllerStopResult:
+        controller = ControllerClient(paths=self.paths)
+        try:
+            result = controller.stop(force=force)
+        except BetterColabError as error:
+            if error.error.code != "CONTROLLER_NOT_RUNNING":
+                raise
+            return ControllerStopResult(
+                stopping=False,
+                forced=force,
+                affected=[],
+                controller_alive=False,
+            )
+        controller.wait_until_stopped(timeout=wait_timeout)
+        return ControllerStopResult(
+            **result,
+            controller_alive=False,
         )
 
     def close(self) -> None:
