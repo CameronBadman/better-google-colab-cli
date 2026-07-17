@@ -4,6 +4,8 @@ status: implemented
 last_updated: 2026-07-17
 change_log:
   - date: 2026-07-17
+    summary: Added atomic parent/child batch queueing, ordered restart-safe membership, stop/cancel policy, and collision-free protected child source spools.
+  - date: 2026-07-17
     summary: Added restart reconciliation over durable dispatch proof plus connection-identity-scoped readiness evidence and reconnect counts.
   - date: 2026-07-17
     summary: Migrated to schema version 3 for indexed text-spool paths, committed byte counts, terminal output hashes, and finalization timestamps.
@@ -79,6 +81,21 @@ confirms dispatch and destroys the spool. A pre-confirmation disconnect that
 becomes `unknown`, or a queued cancellation that becomes terminal, also
 destroys it. File removal precedes the committing state update so a crash can
 lose replayability but cannot permit an unsafe replay.
+
+## Durable batches
+
+Batch creation first fsyncs a distinct protected source spool for every
+selected cell, then inserts the parent, all child executions and transitions,
+and ordered memberships in one transaction. Any conflict rolls back every row
+and removes every newly created spool. A child execution UUID therefore
+belongs to exactly one position in exactly one batch.
+
+Parent state is `queued`, `running`, `cancelling`, then terminal `finished`,
+`error`, or `interrupted`. Default stop-on-error transitions remaining queued
+children to `interrupted` with reason `batch_stopped`; continue-on-error
+preserves later dispatch. Restart discovers active parents first and excludes
+their children from ordinary queued-work scheduling, so one coordinator
+continues the recorded policy.
 
 ## Restart evidence
 

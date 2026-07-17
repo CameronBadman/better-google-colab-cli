@@ -4,6 +4,8 @@ status: implemented
 last_updated: 2026-07-17
 change_log:
   - date: 2026-07-17
+    summary: Added typed notebook inspection/mutation/writeback and parent/child batch start/status/wait/cancel operations.
+  - date: 2026-07-17
     summary: Added typed session status/probe results whose JSON form always retains the seven mandatory health fields.
   - date: 2026-07-17
     summary: Extended typed output pages with normalized stream, MIME, display, error, metadata, and immutable artifact records while preserving bounded cursor responses.
@@ -103,6 +105,20 @@ exits 1 for a proven terminal failure. Caller wait timeout returns current
 state with `wait_timed_out=true` and the CLI exits 124; it is not an exception
 and does not request cancellation.
 
+## Notebook and batch models
+
+`NotebookCellsResult` provides bounded metadata pages without source or
+outputs. `NotebookCell` adds exact source for one path-namespaced cell.
+`NotebookIdsResult` and `NotebookWriteResult` report explicit guarded
+mutations. The synchronous client exposes the same inspect, update, ID
+assignment, execution-selection, and output-writeback behavior as the CLI.
+
+`BatchResult` contains the parent UUID, policy, state, and ordered child
+`ExecutionResult` values. `BatchWaitResult` adds the observational
+`wait_timed_out` field. Attached terminal batch failure exits 1 while
+status remains an exit-0 observation; wait timeout exits 124 without
+cancelling children.
+
 ## Testing strategy
 
 - Invoke the CLI through Typer and parse exactly one stdout line.
@@ -111,4 +127,5 @@ and does not request cancellation.
 - Page/reuse cursors and reject malformed/out-of-range values.
 - Serialize oversized successes and errors and assert the hard cap.
 - Assert all seven health fields survive null/default omission.
+- Assert notebook and batch CLI results round-trip through the public models.
 - Run retained upstream tests to protect text-mode compatibility.

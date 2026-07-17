@@ -5,6 +5,8 @@ schema_version: 1
 last_updated: 2026-07-17
 change_log:
   - date: 2026-07-17
+    summary: Added path-namespaced notebook inspection and guarded mutation, explicit output writeback, atomic child-per-cell batches, stop/continue/cancel policy, scoped controller metadata snapshots, and live stateful verification.
+  - date: 2026-07-17
     summary: Added nonce-verified session health, connection-scoped readiness evidence, no-replay restart reconciliation, same-kernel reconnect boundaries, hard-death election coverage, and live recovery verification.
   - date: 2026-07-17
     summary: Added execution-local text spools, cursor-indexed byte ranges, normalized rich output, immutable MIME and whole-output artifacts, terminal fsync/hash gates, and live large-output verification.
@@ -88,10 +90,10 @@ the same stable envelope and exit-code mapping.
 
 The typed Python layer returns the same public models without importing Typer,
 Rich, or terminal rendering. `BetterColabClient` implements capabilities,
-doctor, controller lifecycle, pruning, and durable execution
-start/status/wait/output/cancel/list. Durable session and notebook methods are
-added with their corresponding milestones. `execution start` never allocates
-a runtime: `session ensure` is the only compound operation allowed to allocate.
+doctor, controller lifecycle, pruning, durable execution, session health,
+guarded notebook documents, output writeback, and cell batches. `execution
+start` never allocates a runtime: `session ensure` is the only compound
+operation allowed to allocate.
 
 ## Controller
 
@@ -147,6 +149,11 @@ cache, reconciles ambiguous durable states, and schedules confirmed recovery
 before ordinary queued work on each kernel FIFO. Concurrent clients replacing
 a hard-killed controller still elect exactly one PID through the startup and
 lifetime locks.
+
+Controller-wide profile and active-work queries use short-lived, query-only
+SQLite snapshots. Kernel transports remain persistent, but a stale WAL reader
+cannot poison future handshakes or stop decisions. Profile-specific worker
+transactions retain their normal scoped durable stores.
 
 ## Durable state
 
@@ -269,15 +276,22 @@ with `execution output` only while `has_more` is true.
 
 Notebook access uses `nbformat` exclusively. Notebook identity is the SHA-256
 of its canonical resolved absolute path; cell identity is always namespaced by
-that notebook and its cell ID. Reads never mutate. Missing IDs require an
-explicit, notebook-hash-guarded assignment command. Cell edits are atomic and
-source-hash guarded. Output writeback is an explicit operation requiring the
-original notebook identity, source hash, complete output, and a terminal
-finished/error execution.
+that notebook and its cell ID. Lists omit source and output; single-cell
+inspection returns exact source and its SHA-256 but still omits output. Reads
+never mutate. Missing IDs require an explicit, notebook-hash-guarded assignment
+command, while duplicate IDs make ID selection fail. Cell edits are atomic and
+source-hash guarded. Execution captures selected source before queueing.
+Output writeback is an explicit operation requiring the original notebook
+identity, cell ID, source hash, complete output, verified artifact hashes, and
+a terminal finished/error execution.
 
-Batches create one durable child execution per selected cell. They stop on the
-first error unless `continue_on_error` is selected; undispatched children
-become interrupted with reason `batch_stopped`.
+Batches atomically create one parent UUID and one durable child execution per
+selected cell. They run on the existing kernel FIFO and stop on the first
+error unless `continue_on_error` is selected; undispatched children become
+`interrupted` with reason `batch_stopped`. Cancellation records parent intent
+and applies normal execution cancellation semantics to each child. Controller
+restart resumes the batch policy rather than independently scheduling its
+queued members.
 
 ## Validation strategy
 
@@ -293,7 +307,7 @@ namespacing, missing/duplicate IDs, stale hashes, and guarded writeback.
 
 Live non-Drive integration tests reuse one CPU assignment where possible and
 cover silent success, controlled exceptions, detach/observe, controller
-restart/no-replay, large output, raw nonce readiness, and stateful notebook
-cells. Every
-live run ends by listing sessions, directly unassigning orphans, and verifying
-that no assignment remains.
+restart/no-replay, large output, raw nonce readiness, stateful notebook cells,
+guarded output writeback, and both batch error policies. Every live run ends by
+listing sessions, directly unassigning orphans, and verifying that no
+assignment remains.

@@ -4,6 +4,8 @@ status: implemented
 last_updated: 2026-07-17
 change_log:
   - date: 2026-07-17
+    summary: Added parent-batch condition topics and short-lived query-only SQLite metadata snapshots so stale WAL readers cannot poison controller handshakes.
+  - date: 2026-07-17
     summary: Added startup health-cache invalidation, durable recovery-before-queue scheduling, same-kernel reconnect workers, and hard-kill replacement coverage.
   - date: 2026-07-17
     summary: Added execution RPCs, persistent per-kernel blocking workers/FIFOs, thread-safe condition publication, queued-work resume, and queued-work stop protection.
@@ -50,10 +52,16 @@ request ID and contain either `result` or a stable error. A mismatch never
 causes automatic controller replacement.
 
 Implemented methods cover handshake/status, profile registration/session
-listing, execution start/status/wait/output/cancel/list, condition
-wait/notification, and controller stop. Profile RPCs accept the normalized
-config/auth/OAuth inputs and filter every response to that profile. Tokens and
-backend URLs are never returned.
+listing, execution start/status/wait/output/cancel/list, batch
+start/status/wait/cancel, condition wait/notification, and controller stop.
+Profile RPCs accept the normalized config/auth/OAuth inputs and filter every
+response to that profile. Tokens and backend URLs are never returned.
+
+Controller-wide profile discovery and active-execution counts open a fresh
+query-only SQLite snapshot for each operation. This keeps kernel connections
+persistent without retaining a WAL reader across unrelated worker commits.
+Live testing caught and now covers the prior failure mode in which such a
+reader returned `SQLITE_NOTADB` even though a fresh integrity check succeeded.
 
 ## Waits
 
@@ -67,7 +75,7 @@ Execution workers publish every durable change onto a profile/execution topic.
 An execution wait checks state while holding that topic's condition, then
 releases the condition only inside `wait`; this closes the lost-wakeup window
 without database polling. The same mechanism is the foundation for batch
-waits.
+waits, which subscribe to a separate profile/parent-batch topic.
 
 ## Kernel workers
 

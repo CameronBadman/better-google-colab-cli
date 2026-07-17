@@ -143,6 +143,39 @@ Use `--detach` to return after queueing, then pass the returned execution UUID
 to `execution status` or `execution wait`. `--wait-timeout`/`wait --timeout`
 only bound the caller and exit 124 without cancelling remote work.
 
+Inspect and execute notebook cells without mutating the document:
+
+```bash
+better-colab notebook cells analysis.ipynb --format json
+better-colab notebook cell analysis.ipynb --cell-id setup --format json
+better-colab execution start \
+  --session demo \
+  --notebook analysis.ipynb \
+  --cell-id setup \
+  --expected-source-sha256 sha256:<inspected-hash> \
+  --format json
+```
+
+Notebook edits are atomic and can be source-hash guarded. Missing cell IDs are
+assigned only by the explicit notebook-hash-guarded `notebook ids assign`
+command. `notebook write-output EXECUTION_ID` is the only in-place output
+writeback and rejects changed source, incomplete output, or a different
+notebook identity.
+
+Run selected cells in one ordered parent batch:
+
+```bash
+better-colab execution batch start \
+  --session demo \
+  --notebook analysis.ipynb \
+  --cell-id setup \
+  --cell-id train \
+  --format json
+```
+
+Batches stop after the first failed child by default; use
+`--continue-on-error` explicitly when later cells should still run.
+
 ## Documentation
 
 - [Agent-first architecture and public contracts](DESIGN.md)
@@ -158,6 +191,7 @@ only bound the caller and exit 124 without cancelling remote work.
 - [Durable execution lifecycle](docs/09_execution_lifecycle.md)
 - [Bounded output and artifacts](docs/10_bounded_output.md)
 - [Session health and proof-safe recovery](docs/11_health_and_recovery.md)
+- [Guarded notebook documents and durable batches](docs/12_notebooks_and_batches.md)
 
 ## Contributing
 

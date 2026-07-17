@@ -4,6 +4,8 @@ status: implemented
 last_updated: 2026-07-17
 change_log:
   - date: 2026-07-17
+    summary: Added exact notebook-cell source capture and restart-safe parent batch scheduling with default stop, continue-on-error, and cancellation policy.
+  - date: 2026-07-17
     summary: Added proof-preserving same-kernel reconnect, kernel-info idle boundaries, restart reconciliation, permanent gap tracking, and live no-replay verification.
   - date: 2026-07-17
     summary: Required output spool finalization and hashing before every terminal transition, with rich output normalized into durable cursor records.
@@ -15,9 +17,9 @@ change_log:
 
 `better-colab execution start|status|wait|output|cancel|list` and the matching
 `BetterColabClient` methods are implemented. `start` accepts exact UTF-8 file
-or stdin source; notebook selection is completed with the guarded notebook
-milestone. It never allocates a runtime. The named session must already exist
-in the selected profile.
+or stdin source, or one guarded notebook cell selected by path plus ID/index.
+It never allocates a runtime. The named session must already exist in the
+selected profile.
 
 ## Dispatch and proof
 
@@ -113,6 +115,23 @@ At expiry the worker records `timed_out` intent and sends one interrupt.
 Matching interruption reply/idle proves `timed_out`; ambiguous interrupt
 delivery becomes `unknown`.
 
+## Notebook cells and batches
+
+Notebook execution resolves the selected cell with `nbformat`, verifies an
+optional exact-source hash, and includes path identity, cell ID/index, and
+source SHA-256 in provenance. The source bytes are captured before the durable
+queue operation, so later file edits cannot change what the kernel receives.
+
+A batch reserves one parent UUID and one child execution UUID per selected
+cell. The parent and every queued child are committed atomically before the
+kernel FIFO receives one batch work item. The worker applies the normal
+dispatch/proof lifecycle to each child in order. By default, its first
+non-success terminal child stops the batch and marks later queued children
+`interrupted` with `batch_stopped`; `--continue-on-error` dispatches them.
+Cancellation uses each child's existing queued/running cancellation contract.
+On restart, active parent membership prevents children from being submitted as
+unrelated executions.
+
 ## Verification
 
 Deterministic tests cover both evidence orderings, missing/malformed/mismatched
@@ -134,3 +153,8 @@ because terminal messages crossed the observation gap; output remained
 incomplete. A subsequent execution read the kernel counter as exactly one,
 proving the original source was not replayed. The test re-probes readiness,
 stops the assignment, and requires an empty live session list.
+
+`integration/repro_notebook_batches/test.sh` reuses one live CPU kernel to
+verify stateful guarded cell execution, explicit output writeback, stop and
+continue batch policies, undispatched-child isolation, stale-edit rejection,
+guarded ID assignment, and final assignment cleanup.
