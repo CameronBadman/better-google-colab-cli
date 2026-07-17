@@ -239,6 +239,27 @@ class NotebookCellSummary(PublicModel):
     cell_id: str | None = None
 
 
+class NotebookCell(NotebookCellSummary):
+    path: str
+    notebook_sha256: str
+    source: str
+
+
+class NotebookCellsResult(PublicModel):
+    notebook_id: str
+    path: str
+    notebook_sha256: str
+    cells: list[NotebookCellSummary]
+    next_cursor: str | None = None
+
+
+class NotebookIdsResult(PublicModel):
+    notebook_id: str
+    path: str
+    notebook_sha256: str
+    assigned: list[str]
+
+
 class PruneResult(PublicModel):
     dry_run: bool
     matched: int

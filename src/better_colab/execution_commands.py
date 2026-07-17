@@ -17,6 +17,7 @@ from better_colab.models import (
     ExecutionWaitResult,
     OutputPage,
 )
+from better_colab.notebooks import NotebookDocument
 from better_colab.protocol import (
     DEFAULT_EXECUTION_LIMIT,
     DEFAULT_OUTPUT_PAGE_BYTES,
@@ -112,13 +113,33 @@ def _read_source(
     cell_index: int | None,
 ) -> tuple[str, dict]:
     if notebook is not None:
-        raise api_error(
-            "NOTEBOOK_EXECUTION_NOT_AVAILABLE",
-            "Notebook cell execution is introduced with notebook operations",
-            exit_code=ExitCode.UNAVAILABLE,
-            retryable=False,
-            suggested_action="use_file_or_stdin",
+        cell = NotebookDocument(notebook).cell(
+            cell_id=cell_id,
+            index=cell_index,
         )
+        if cell.cell_type != "code":
+            raise api_error(
+                "CELL_NOT_CODE",
+                "Only code cells can be executed",
+                exit_code=ExitCode.USAGE,
+                retryable=False,
+                suggested_action="select_a_code_cell",
+            )
+        if cell.cell_id is None:
+            raise api_error(
+                "CELL_ID_REQUIRED",
+                "Assign a notebook cell ID before durable execution",
+                exit_code=ExitCode.CONFLICT,
+                retryable=False,
+                suggested_action="assign_notebook_ids",
+            )
+        return cell.source, {
+            "kind": "notebook_cell",
+            "path": cell.path,
+            "notebook_id": cell.notebook_id,
+            "cell_id": cell.cell_id,
+            "cell_index": cell.index,
+        }
     if cell_id is not None or cell_index is not None:
         raise api_error(
             "NOTEBOOK_REQUIRED",

@@ -5,6 +5,7 @@ from better_colab import (
     controller_commands,
     durable_commands,
     execution_commands,
+    notebook_commands,
     session_commands,
 )
 from colab_cli.cli import create_app
@@ -20,6 +21,7 @@ durable_commands.register(app)
 execution_commands.register(app)
 controller_commands.register(app)
 session_commands.register(app)
+notebook_commands.register(app)
 
 
 def main() -> None:

@@ -21,12 +21,17 @@ from better_colab.models import (
     ExecutionListResult,
     ExecutionResult,
     ExecutionWaitResult,
+    NotebookCell,
+    NotebookCellsResult,
+    NotebookIdsResult,
     OutputPage,
     PruneResult,
     SessionHealthResult,
 )
+from better_colab.notebooks import NotebookDocument
 from better_colab.protocol import (
     DEFAULT_EXECUTION_LIMIT,
+    DEFAULT_NOTEBOOK_CELL_LIMIT,
     DEFAULT_OUTPUT_PAGE_BYTES,
     SCHEMA_VERSION,
 )
@@ -296,6 +301,50 @@ class BetterColabClient:
             limit=limit,
         )
         return ExecutionListResult.model_validate(result)
+
+    def notebook_cells(
+        self,
+        path: str | os.PathLike[str],
+        *,
+        cursor: str | None = None,
+        limit: int = DEFAULT_NOTEBOOK_CELL_LIMIT,
+    ) -> NotebookCellsResult:
+        return NotebookDocument(path).cells(cursor=cursor, limit=limit)
+
+    def notebook_cell(
+        self,
+        path: str | os.PathLike[str],
+        *,
+        cell_id: str | None = None,
+        index: int | None = None,
+    ) -> NotebookCell:
+        return NotebookDocument(path).cell(cell_id=cell_id, index=index)
+
+    def update_notebook_cell(
+        self,
+        path: str | os.PathLike[str],
+        *,
+        source: str,
+        cell_id: str | None = None,
+        index: int | None = None,
+        expected_sha256: str | None = None,
+    ) -> NotebookCell:
+        return NotebookDocument(path).update_source(
+            source=source,
+            cell_id=cell_id,
+            index=index,
+            expected_sha256=expected_sha256,
+        )
+
+    def assign_notebook_ids(
+        self,
+        path: str | os.PathLike[str],
+        *,
+        expected_notebook_sha256: str,
+    ) -> NotebookIdsResult:
+        return NotebookDocument(path).assign_ids(
+            expected_notebook_sha256=expected_notebook_sha256,
+        )
 
     def close(self) -> None:
         if self._store is not None:
