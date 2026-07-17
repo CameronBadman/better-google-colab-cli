@@ -4,6 +4,8 @@ status: implemented
 last_updated: 2026-07-17
 change_log:
   - date: 2026-07-17
+    summary: Added proof-preserving same-kernel reconnect, kernel-info idle boundaries, restart reconciliation, permanent gap tracking, and live no-replay verification.
+  - date: 2026-07-17
     summary: Required output spool finalization and hashing before every terminal transition, with rich output normalized into durable cursor records.
   - date: 2026-07-17
     summary: Added the pinned low-level kernel adapter, per-kernel FIFO workers, exact-once dispatch boundary, matching reply/idle proof, idempotent start, condition waits, cancellation, deadlines, and the first live execution suite.
@@ -50,8 +52,26 @@ transition that bypasses this gate.
 
 A disconnect before the first matching inbound message becomes terminal
 `unknown`; the request is never replayed. A disconnect after confirmation
-becomes `disconnected` and permanently sets `output_complete=false`. Reconnect
-and restart reconciliation are extended by the recovery milestone.
+becomes `disconnected` and permanently sets `output_complete=false`.
+
+## Reconnect and restart
+
+On controller restart, a record left in `dispatching` is terminally unknown
+because the send boundary cannot be reconstructed. A confirmed running record
+with already-durable matching reply and idle is finalized from that evidence.
+Any other confirmed running record becomes `disconnected`; its exact output can
+never again be claimed complete.
+
+The recovery worker never calls `prepare_execution` and never reads queued
+source bytes. It reconnects only when endpoint, kernel ID, and Jupyter session
+ID exactly match the dispatch snapshots. It restores persisted reply, idle,
+error, traceback, cancellation, and deadline evidence, then sends a distinct
+`kernel_info_request`. Original-parent messages observed on the new connection
+may supply missing proof in either order. If the kernel-info reply and its
+matching idle arrive while original terminal proof is still incomplete, the
+kernel has crossed a known idle boundary and the execution becomes `unknown`,
+not successful. Transport loss before that boundary retries the same-identity
+connection without replay.
 
 ## Workers and waits
 
@@ -105,3 +125,12 @@ and verifies silent proof, controlled exception exit/output, detached
 cross-process observation, idempotent retry, and persistent state across
 executions. It stops the controller and runtime, then requires the live session
 list to be empty.
+
+`integration/repro_health_recovery/test.sh` validates the raw nonce probe on a
+live CPU kernel, starts one state-mutating long execution, hard-kills the
+controller after confirmation, elects a replacement, and waits for proof-safe
+reconciliation. The observed restart intentionally resolved to `unknown`
+because terminal messages crossed the observation gap; output remained
+incomplete. A subsequent execution read the kernel counter as exactly one,
+proving the original source was not replayed. The test re-probes readiness,
+stops the assignment, and requires an empty live session list.

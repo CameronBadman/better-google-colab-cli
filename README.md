@@ -107,6 +107,19 @@ better-colab controller stop --format json
 Normal stop refuses active durable work. `controller stop --force` is an
 explicit recovery action that records affected work as uncertain.
 
+Inspect the controller-owned connection passively or verify kernel execution
+with a no-history nonce:
+
+```bash
+better-colab session status demo --format json
+better-colab session probe demo --format json
+```
+
+Readiness is cached only for the current kernel connection. A disconnect or
+controller restart invalidates it. Confirmed work reconnects only to collect
+matching proof from the same endpoint/kernel/session identity; Better Colab
+never replays an ambiguously sent request or infers success from idle alone.
+
 Durable execution snapshots source before queueing, never allocates a runtime,
 and waits for matching Jupyter reply plus idle proof:
 
@@ -143,6 +156,8 @@ only bound the caller and exit 124 without cancelling remote work.
 - [Durable SQLite state](docs/07_durable_state.md)
 - [Local controller and startup election](docs/08_controller.md)
 - [Durable execution lifecycle](docs/09_execution_lifecycle.md)
+- [Bounded output and artifacts](docs/10_bounded_output.md)
+- [Session health and proof-safe recovery](docs/11_health_and_recovery.md)
 
 ## Contributing
 

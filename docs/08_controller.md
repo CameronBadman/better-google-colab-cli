@@ -4,6 +4,8 @@ status: implemented
 last_updated: 2026-07-17
 change_log:
   - date: 2026-07-17
+    summary: Added startup health-cache invalidation, durable recovery-before-queue scheduling, same-kernel reconnect workers, and hard-kill replacement coverage.
+  - date: 2026-07-17
     summary: Added execution RPCs, persistent per-kernel blocking workers/FIFOs, thread-safe condition publication, queued-work resume, and queued-work stop protection.
   - date: 2026-07-17
     summary: Added the framed Unix protocol, single-instance locks, detached autostart, profile RPCs, condition waits, lifecycle commands, and forced-stop reconciliation.
@@ -77,9 +79,10 @@ connection, execution, and interrupt calls block in their owner threads.
 
 The worker publishes state back to the event loop with
 `call_soon_threadsafe`; controller wait responses are therefore server-pushed.
-Controller startup submits only durably safe queued work. Already-dispatched
-restart reconciliation is deliberately proof-driven and belongs to the
-recovery milestone.
+Controller startup invalidates stale connection health, reconciles
+already-dispatched records from durable evidence, schedules confirmed
+reconnects first, and then submits durably safe queued work. Recovery and new
+execution for one kernel therefore share the same FIFO and queue consumer.
 
 ## Lifecycle safety
 
@@ -95,8 +98,8 @@ listener, clients, database connection, PID file, socket, and lifetime lock.
 
 Signals use the same forced-uncertainty path. A hard process death cannot run
 cleanup; the next election sees the released OS lock, removes the stale socket,
-and starts one replacement. Detailed restart reconciliation is added with the
-health/recovery milestone.
+and starts one replacement. Tests kill the detached controller with `SIGKILL`
+and race eight clients; every client observes the same newly elected PID.
 
 ## Testing and benchmark strategy
 

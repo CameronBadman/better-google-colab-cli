@@ -5,6 +5,8 @@ schema_version: 1
 last_updated: 2026-07-17
 change_log:
   - date: 2026-07-17
+    summary: Added nonce-verified session health, connection-scoped readiness evidence, no-replay restart reconciliation, same-kernel reconnect boundaries, hard-death election coverage, and live recovery verification.
+  - date: 2026-07-17
     summary: Added execution-local text spools, cursor-indexed byte ranges, normalized rich output, immutable MIME and whole-output artifacts, terminal fsync/hash gates, and live large-output verification.
   - date: 2026-07-17
     summary: Implemented persistent per-kernel execution workers, exact-once dispatch, matching reply/idle proof, idempotent typed/CLI operations, condition waits, verified cancellation/deadlines, and a live CPU integration suite.
@@ -140,6 +142,12 @@ incomplete and journals running work
 through `disconnected -> unknown` (or ambiguous dispatch directly to
 `unknown`) before closing the socket.
 
+On startup the controller invalidates every prior connection-scoped readiness
+cache, reconciles ambiguous durable states, and schedules confirmed recovery
+before ordinary queued work on each kernel FIFO. Concurrent clients replacing
+a hard-killed controller still elect exactly one PID through the startup and
+lifetime locks.
+
 ## Durable state
 
 SQLite is authoritative and uses WAL, foreign keys, `busy_timeout`,
@@ -213,9 +221,25 @@ idleness never imply completion.
 A pre-confirmation disconnect becomes terminal `unknown` and is never replayed.
 A confirmed disconnect remains recoverable using the same kernel and Jupyter
 session identities, but any observation gap permanently makes
-`output_complete=false`. On restart, only `created` and `queued` work can
-resume. Ambiguous dispatch becomes `unknown`; confirmed running work reconnects
-without replay.
+`output_complete=false`. On restart, only `created` and `queued` work can be
+dispatched from retained source. Ambiguous dispatch becomes `unknown`;
+confirmed running work reconnects only for observation, without replay.
+
+Recovery is implemented without retaining or reconstructing the original
+request. The worker requires the recorded endpoint, kernel ID, and Jupyter
+session ID, restores only durable reply/idle/error evidence, and sends a new
+`kernel_info_request` as an observation boundary. Late messages matching the
+original parent may still complete the execution. If the boundary proves the
+same kernel idle before terminal proof is complete, the result is `unknown`;
+idle or reconnection alone never implies success.
+
+`session status` passively reports controller/connection evidence.
+`session probe` serializes through the kernel FIFO and executes a raw
+`store_history=false` request whose user expression must return an exact random
+nonce, followed by matching idle. Its result and the synchronous API always
+include the seven mandatory health fields. Readiness is cached only for the
+current connection/kernel identity and is cleared on transport loss or
+controller restart.
 
 Idempotency keys hash the canonical request. Identical reuse returns the
 existing execution; different reuse returns `IDEMPOTENCY_CONFLICT`. A wait
@@ -260,12 +284,16 @@ become interrupted with reason `batch_stopped`.
 Every behavior begins with a failing deterministic test. Conformance tests pin
 all private kernel-client access to one transport adapter. Crash-boundary tests
 cover each durable transition. Socket-election tests exercise concurrent
-startup, profile isolation, and controller replacement. Output tests assert
-caps, stable cursors, checksums, and no duplication. Notebook tests cover path
+startup, profile isolation, hard-death replacement, and exactly one elected
+PID. Recovery tests assert that original requests are never replayed, durable
+proof is preserved, a kernel-info idle boundary cannot manufacture
+success, and observation gaps stay incomplete. Output tests assert caps,
+stable cursors, checksums, and no duplication. Notebook tests cover path
 namespacing, missing/duplicate IDs, stale hashes, and guarded writeback.
 
 Live non-Drive integration tests reuse one CPU assignment where possible and
 cover silent success, controlled exceptions, detach/observe, controller
-restart, large output, readiness probes, and stateful notebook cells. Every
+restart/no-replay, large output, raw nonce readiness, and stateful notebook
+cells. Every
 live run ends by listing sessions, directly unassigning orphans, and verifying
 that no assignment remains.

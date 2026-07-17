@@ -4,6 +4,8 @@ status: implemented
 last_updated: 2026-07-17
 change_log:
   - date: 2026-07-17
+    summary: Added typed session status/probe results whose JSON form always retains the seven mandatory health fields.
+  - date: 2026-07-17
     summary: Extended typed output pages with normalized stream, MIME, display, error, metadata, and immutable artifact records while preserving bounded cursor responses.
   - date: 2026-07-17
     summary: Added typed execution start/status/wait/output/cancel/list operations and their observation-versus-attached exit behavior.
@@ -57,6 +59,13 @@ versions, and the seven mandatory health fields. Before the controller
 milestone it reports only passive local socket evidence and makes no
 authentication or backend call. It also skips legacy file logging, so
 capability discovery and doctor work in read-only/sandboxed homes.
+
+`BetterColabClient.session_status(name)` and `session_probe(name, timeout=...)`
+return `SessionHealthResult`. The matching `better-colab session status|probe`
+commands use the same model. Unlike optional fields elsewhere in compact JSON,
+the following are always serialized: `controller_alive`, `backend_alive`,
+`kernel_connected`, `kernel_execution_ready`, `kernel_probe_at`,
+`kernel_probe_latency_ms`, and `kernel_probe_error`.
 
 ## Flat-command migration
 

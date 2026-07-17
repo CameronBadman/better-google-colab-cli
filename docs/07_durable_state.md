@@ -4,6 +4,8 @@ status: implemented
 last_updated: 2026-07-17
 change_log:
   - date: 2026-07-17
+    summary: Added restart reconciliation over durable dispatch proof plus connection-identity-scoped readiness evidence and reconnect counts.
+  - date: 2026-07-17
     summary: Migrated to schema version 3 for indexed text-spool paths, committed byte counts, terminal output hashes, and finalization timestamps.
   - date: 2026-07-17
     summary: Migrated to schema version 2 for execution timeout, interrupt intent, and reply-status evidence used by durable kernel workers.
@@ -77,6 +79,22 @@ confirms dispatch and destroys the spool. A pre-confirmation disconnect that
 becomes `unknown`, or a queued cancellation that becomes terminal, also
 destroys it. File removal precedes the committing state update so a crash can
 lose replayability but cannot permit an unsafe replay.
+
+## Restart evidence
+
+Kernel-connection rows bind readiness evidence to profile, session, kernel ID,
+Jupyter session ID, and one controller-generated connection ID. A nonce,
+timestamp, latency, and error are stored only while that exact connection is
+current. Disconnect and controller startup clear the readiness fields rather
+than carrying a stale healthy result across transports.
+
+Restart reconciliation is driven exclusively by durable execution flags.
+Unconfirmed `dispatching` becomes terminal `unknown`; complete reply-plus-idle
+evidence is finalized immediately; confirmed `running` becomes
+`disconnected`; and already-disconnected work remains eligible for reconnect.
+Every restart observation gap permanently writes `output_complete=false`.
+Successful same-identity connections increment `reconnect_count`; they never
+make a state terminal by themselves.
 
 ## Pruning
 
