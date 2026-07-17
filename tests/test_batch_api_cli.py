@@ -189,6 +189,33 @@ def test_batch_controller_rpc_creates_one_child_per_cell_and_waits(tmp_path):
                     },
                 )
             )
+            after_id = str(uuid.uuid4())
+            after = await server._dispatch(
+                _request(
+                    "execution.start",
+                    {
+                        "profile": _profile_params(profile),
+                        "execution_id": after_id,
+                        "session": "training",
+                        "source": "after_batch = True",
+                        "provenance": {"kind": "stdin"},
+                        "idempotency_key": None,
+                        "execution_timeout": None,
+                    },
+                )
+            )
+            after_wait = await server._dispatch(
+                _request(
+                    "execution.wait",
+                    {
+                        "profile": _profile_params(profile),
+                        "execution_id": after_id,
+                        "timeout": 2,
+                        "cursor": None,
+                        "max_bytes": 65536,
+                    },
+                )
+            )
         finally:
             await server.close()
 
@@ -203,7 +230,12 @@ def test_batch_controller_rpc_creates_one_child_per_cell_and_waits(tmp_path):
             "error",
             "interrupted",
         ]
-        assert transport.sent == ["raise ValueError('bad')"]
+        assert transport.sent == [
+            "raise ValueError('bad')",
+            "after_batch = True",
+        ]
+        assert after["state"] == "queued"
+        assert after_wait["state"] == "finished"
 
     asyncio.run(scenario())
 
