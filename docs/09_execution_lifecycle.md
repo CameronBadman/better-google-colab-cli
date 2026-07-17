@@ -4,6 +4,8 @@ status: implemented
 last_updated: 2026-07-17
 change_log:
   - date: 2026-07-17
+    summary: Required output spool finalization and hashing before every terminal transition, with rich output normalized into durable cursor records.
+  - date: 2026-07-17
     summary: Added the pinned low-level kernel adapter, per-kernel FIFO workers, exact-once dispatch boundary, matching reply/idle proof, idempotent start, condition waits, cancellation, deadlines, and the first live execution suite.
 ---
 
@@ -40,6 +42,11 @@ malformed reply, and a mismatched parent never prove success. An `ok` reply
 plus idle proves `finished`, including silent execution with no output. An
 error reply plus idle proves `error` and retains the error name, value,
 traceback, and preceding output.
+
+Before any terminal transition, the worker fsyncs the text spool, verifies its
+committed length, records its SHA-256 and finalization timestamp, and promotes
+large complete text to an immutable artifact. Storage rejects a terminal
+transition that bypasses this gate.
 
 A disconnect before the first matching inbound message becomes terminal
 `unknown`; the request is never replayed. A disconnect after confirmation

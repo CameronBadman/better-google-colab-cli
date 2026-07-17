@@ -120,6 +120,12 @@ printf 'print("durable")\n' |
 better-colab stop -s demo
 ```
 
+Attached waits include the first bounded output page. If it reports
+`has_more:true`, pass its opaque `next_cursor` to
+`better-colab execution output`. Binary and large MIME values—and large
+complete text output—are returned as immutable artifacts with byte size,
+media type, and SHA-256.
+
 Use `--detach` to return after queueing, then pass the returned execution UUID
 to `execution status` or `execution wait`. `--wait-timeout`/`wait --timeout`
 only bound the caller and exit 124 without cancelling remote work.

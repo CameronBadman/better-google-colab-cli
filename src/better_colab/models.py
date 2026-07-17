@@ -79,6 +79,8 @@ class HealthResult(PublicModel):
 class Limits(PublicModel):
     response_bytes: int
     output_page_bytes: int
+    output_page_min_bytes: int
+    output_page_max_bytes: int
     execution_page_default: int
     notebook_cell_page_default: int
     collection_page_max: int
@@ -150,7 +152,13 @@ class OutputEvent(PublicModel):
     stream: str | None = None
     mime_type: str | None = None
     artifact: Artifact | None = None
-    truncated: bool = False
+    display_id: str | None = None
+    execution_count: int | None = None
+    metadata: dict[str, Any] | None = None
+    error_name: str | None = None
+    error_value: str | None = None
+    traceback: list[str] | None = None
+    wait: bool | None = None
 
 
 class OutputPage(PublicModel):

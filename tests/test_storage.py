@@ -1,5 +1,6 @@
 import json
 import os
+import sqlite3
 import stat
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -7,7 +8,13 @@ from pathlib import Path
 import pytest
 
 from better_colab import BetterColabError, ExecutionState
-from better_colab.storage import DurableStore, ProfileSpec, StatePaths
+from better_colab.storage import (
+    MIGRATION_2,
+    SCHEMA_V1,
+    DurableStore,
+    ProfileSpec,
+    StatePaths,
+)
 
 
 def _utc(year: int, month: int, day: int) -> datetime:
@@ -68,6 +75,7 @@ def _create_execution(
 def _finish_execution(store: DurableStore, execution_id: str):
     store.transition_execution(execution_id, ExecutionState.DISPATCHING)
     store.confirm_dispatch(execution_id)
+    store.finalize_output(execution_id)
     store.transition_execution(execution_id, ExecutionState.FINISHED)
 
 
@@ -91,7 +99,7 @@ def test_database_schema_pragmas_and_private_modes(store, paths):
         "foreign_keys": 1,
         "busy_timeout": 5000,
         "synchronous": 2,
-        "user_version": 2,
+        "user_version": 3,
     }
     assert {
         "profiles",
@@ -107,6 +115,34 @@ def test_database_schema_pragmas_and_private_modes(store, paths):
     assert stat.S_IMODE(paths.state_dir.stat().st_mode) == 0o700
     assert stat.S_IMODE(paths.artifacts_dir.stat().st_mode) == 0o700
     assert stat.S_IMODE(paths.database.stat().st_mode) == 0o600
+
+
+def test_schema_two_database_migrates_output_spool_metadata(paths, profile):
+    paths.ensure()
+    connection = sqlite3.connect(paths.database)
+    connection.executescript(SCHEMA_V1)
+    for statement in MIGRATION_2.split(";"):
+        if statement.strip():
+            connection.execute(statement)
+    connection.execute("PRAGMA user_version=2")
+    connection.commit()
+    connection.close()
+
+    migrated = DurableStore(paths=paths, profile=profile)
+    try:
+        columns = {
+            row["name"]
+            for row in migrated.connection.execute("PRAGMA table_info(executions)")
+        }
+        assert migrated.connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert {
+            "output_spool_path",
+            "output_byte_size",
+            "output_sha256",
+            "output_finalized_at",
+        } <= columns
+    finally:
+        migrated.close()
 
 
 def test_profile_namespace_is_normalized_and_isolated(tmp_path):
@@ -282,6 +318,7 @@ def test_source_is_destroyed_after_confirmed_dispatch_or_ambiguity(store):
     )
     ambiguous_path = Path(ambiguous.source_spool_path)
     store.transition_execution(ambiguous.execution_id, ExecutionState.DISPATCHING)
+    store.finalize_output(ambiguous.execution_id)
     unknown = store.transition_execution(
         ambiguous.execution_id,
         ExecutionState.UNKNOWN,
@@ -365,7 +402,22 @@ def test_batches_keep_one_ordered_child_per_member(store):
 
 def test_prune_is_dry_run_by_default_and_never_matches_nonterminal(store):
     terminal = _create_execution(store)
+    output_text = "durable output\n" * 6000
+    store.append_output_event(
+        terminal.execution_id,
+        {"event_type": "stream", "stream": "stdout", "text": output_text},
+    )
+    output_spool = Path(store.get_execution(terminal.execution_id).output_spool_path)
     _finish_execution(store, terminal.execution_id)
+    promoted_artifact = Path(
+        store.connection.execute(
+            """
+            SELECT path FROM artifacts
+            WHERE execution_id = ? AND purpose = 'complete_text_output'
+            """,
+            (terminal.execution_id,),
+        ).fetchone()["path"]
+    )
     queued = _create_execution(
         store,
         execution_id="00000000-0000-4000-8000-000000000006",
@@ -382,10 +434,14 @@ def test_prune_is_dry_run_by_default_and_never_matches_nonterminal(store):
 
     assert preview.dry_run is True
     assert preview.execution_ids == [terminal.execution_id]
-    assert preview.artifact_bytes == len(b"artifact bytes")
+    assert preview.artifact_bytes == len(b"artifact bytes") + len(
+        output_text.encode()
+    )
     assert store.get_execution(terminal.execution_id) is not None
     assert store.get_execution(queued.execution_id) is not None
     assert Path(artifact.path).exists()
+    assert promoted_artifact.exists()
+    assert output_spool.exists()
 
     deleted = store.prune_executions(before=future, confirm=True)
 
@@ -393,6 +449,8 @@ def test_prune_is_dry_run_by_default_and_never_matches_nonterminal(store):
     assert store.get_execution(terminal.execution_id) is None
     assert store.get_execution(queued.execution_id) is not None
     assert not Path(artifact.path).exists()
+    assert not promoted_artifact.exists()
+    assert not output_spool.exists()
 
 
 def test_default_paths_follow_xdg_state_and_runtime(monkeypatch, tmp_path):

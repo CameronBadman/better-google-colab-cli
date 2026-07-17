@@ -192,6 +192,7 @@ class _KernelWorker:
                 return
             evidence = {"error_type": type(error).__name__}
             if current.state is ExecutionState.QUEUED:
+                store.finalize_output(execution_id)
                 store.transition_execution(
                     execution_id,
                     ExecutionState.INTERRUPTED,
@@ -200,6 +201,7 @@ class _KernelWorker:
                     completion_source="live",
                 )
             elif current.state is ExecutionState.DISPATCHING:
+                store.finalize_output(execution_id)
                 store.transition_execution(
                     execution_id,
                     ExecutionState.UNKNOWN,
@@ -218,6 +220,7 @@ class _KernelWorker:
                     )
                     current = store.get_execution(execution_id)
                 if current.state is ExecutionState.DISCONNECTED:
+                    store.finalize_output(execution_id)
                     store.transition_execution(
                         execution_id,
                         ExecutionState.UNKNOWN,
@@ -256,6 +259,7 @@ class _KernelWorker:
             session = store.get_session(record.session_name)
             if session is None:
                 # This can happen only if a session is removed after queueing.
+                store.finalize_output(execution_id)
                 store.transition_execution(
                     execution_id,
                     ExecutionState.INTERRUPTED,
@@ -268,6 +272,7 @@ class _KernelWorker:
             try:
                 code = source.decode("utf-8")
             except UnicodeDecodeError:
+                store.finalize_output(execution_id)
                 store.transition_execution(
                     execution_id,
                     ExecutionState.INTERRUPTED,
@@ -387,6 +392,7 @@ class _KernelWorker:
                     self.notify(self.profile, execution_id)
 
                 if observation.terminal_state is not None:
+                    store.finalize_output(execution_id)
                     store.transition_execution(
                         execution_id,
                         ExecutionState(observation.terminal_state),
@@ -418,6 +424,7 @@ class _KernelWorker:
         if current is None:
             return
         if current.state is ExecutionState.QUEUED:
+            store.finalize_output(execution_id)
             store.transition_execution(
                 execution_id,
                 ExecutionState.INTERRUPTED,
@@ -426,6 +433,7 @@ class _KernelWorker:
                 completion_source="live",
             )
         elif current.state is ExecutionState.DISPATCHING:
+            store.finalize_output(execution_id)
             store.transition_execution(
                 execution_id,
                 ExecutionState.UNKNOWN,
@@ -447,6 +455,7 @@ class _KernelWorker:
             return
         if not proof.dispatch_confirmed:
             if current.state is ExecutionState.DISPATCHING:
+                store.finalize_output(execution_id)
                 store.transition_execution(
                     execution_id,
                     ExecutionState.UNKNOWN,
@@ -480,6 +489,7 @@ class _KernelWorker:
             )
             current = store.get_execution(execution_id)
         if current.state is ExecutionState.DISCONNECTED:
+            store.finalize_output(execution_id)
             store.transition_execution(
                 execution_id,
                 ExecutionState.UNKNOWN,

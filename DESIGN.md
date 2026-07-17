@@ -5,6 +5,8 @@ schema_version: 1
 last_updated: 2026-07-17
 change_log:
   - date: 2026-07-17
+    summary: Added execution-local text spools, cursor-indexed byte ranges, normalized rich output, immutable MIME and whole-output artifacts, terminal fsync/hash gates, and live large-output verification.
+  - date: 2026-07-17
     summary: Implemented persistent per-kernel execution workers, exact-once dispatch, matching reply/idle proof, idempotent typed/CLI operations, condition waits, verified cancellation/deadlines, and a live CPU integration suite.
   - date: 2026-07-17
     summary: Implemented the single-instance Unix controller, framed protocol, startup election, condition waits, profile routing, explicit lifecycle commands, and forced-stop uncertainty.
@@ -146,9 +148,10 @@ stored at `${XDG_STATE_HOME:-~/.local/state}/better-colab/controller.sqlite3`;
 protected output/source spools and immutable artifacts are siblings under
 `artifacts/`.
 
-Schema version 2 is implemented in `better_colab.storage`. Version 1 creates
+Schema version 3 is implemented in `better_colab.storage`. Version 1 creates
 the core tables; migration 2 adds execution-timeout duration, interrupt intent,
-and validated reply-status evidence. The database and
+and validated reply-status evidence; migration 3 adds text-spool location,
+committed byte count, terminal SHA-256, and finalization time. The database and
 payload files are mode `0600`; Better Colab state, artifact, source, output,
 and runtime directories are mode `0700`. The store pre-creates the database
 with restrictive permissions before SQLite can open it. A newer unknown
@@ -186,8 +189,8 @@ executions, so history survives stop/pruning of runtime assignments.
 confirmation is always a dry run; only terminal states older than the supplied
 timezone-aware timestamp are eligible. Confirmed deletion cascades journals,
 output indexes, batch memberships, and artifact metadata, then unlinks the
-pre-enumerated artifact files. Queued/running/disconnected work is never
-matched.
+pre-enumerated artifact and text-spool files. Queued/running/disconnected work
+is never matched.
 
 ## Execution proof and recovery
 
@@ -234,7 +237,11 @@ Text output is appended to an execution-local spool and indexed transactionally
 by cursor. Binary and large MIME payloads become atomic immutable artifacts
 with byte size, media type, and SHA-256. Terminal transitions occur only after
 spool fsync and hashing. Cursor reuse is stable, and advancing never duplicates
-bytes.
+bytes. Large complete text spools are additionally exposed as cursor-indexed
+artifacts while remaining readable in bounded pages. Each output event keeps
+its stream, MIME type, display identity, execution count, display metadata, or
+error metadata as applicable. `wait` returns the first page; callers continue
+with `execution output` only while `has_more` is true.
 
 Notebook access uses `nbformat` exclusively. Notebook identity is the SHA-256
 of its canonical resolved absolute path; cell identity is always namespaced by

@@ -16,7 +16,9 @@ from better_colab.protocol import (
     INTERNAL_PROTOCOL_VERSION,
     MAX_COLLECTION_LIMIT,
     MAX_CONTROLLER_REQUEST_BYTES,
+    MAX_OUTPUT_PAGE_BYTES,
     MAX_RESPONSE_BYTES,
+    MIN_OUTPUT_PAGE_BYTES,
     SCHEMA_VERSION,
     page_items,
 )
@@ -310,6 +312,8 @@ def get_capabilities(
         limits=Limits(
             response_bytes=MAX_RESPONSE_BYTES,
             output_page_bytes=DEFAULT_OUTPUT_PAGE_BYTES,
+            output_page_min_bytes=MIN_OUTPUT_PAGE_BYTES,
+            output_page_max_bytes=MAX_OUTPUT_PAGE_BYTES,
             execution_page_default=DEFAULT_EXECUTION_LIMIT,
             notebook_cell_page_default=DEFAULT_NOTEBOOK_CELL_LIMIT,
             collection_page_max=MAX_COLLECTION_LIMIT,

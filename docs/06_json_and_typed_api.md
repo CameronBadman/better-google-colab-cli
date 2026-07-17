@@ -4,6 +4,8 @@ status: implemented
 last_updated: 2026-07-17
 change_log:
   - date: 2026-07-17
+    summary: Extended typed output pages with normalized stream, MIME, display, error, metadata, and immutable artifact records while preserving bounded cursor responses.
+  - date: 2026-07-17
     summary: Added typed execution start/status/wait/output/cancel/list operations and their observation-versus-attached exit behavior.
   - date: 2026-07-17
     summary: Added schema-v1 envelopes, public models, capability pagination, response caps, doctor, and legacy JSON adapters.
@@ -78,6 +80,13 @@ The synchronous client now implements execution start, status, wait, output,
 cancel, and list. `ExecutionResult`, `ExecutionWaitResult`,
 `ExecutionListResult`, and `OutputPage` are shared directly with JSON mode;
 the typed layer has no Typer, Rich, or terminal-rendering dependency.
+
+`OutputPage` contains ordered `OutputEvent` values. Text is bounded and
+cursor-readable; binary and large MIME representations contain an `Artifact`
+with a protected local path, media type, byte size, and `sha256:<hex>`.
+Large complete text output is also emitted as an artifact event after its
+cursor-readable chunks. Stream names, MIME types, display IDs/counts and
+metadata, clear-output behavior, and structured error fields are retained.
 
 Execution status is an observation and returns normally even for `error` or
 `unknown`. Attached start/wait still returns the typed observation but the CLI

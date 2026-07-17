@@ -34,7 +34,6 @@ from better_colab.protocol import (
     DEFAULT_OUTPUT_PAGE_BYTES,
     INTERNAL_PROTOCOL_VERSION,
     MAX_COLLECTION_LIMIT,
-    MAX_RESPONSE_BYTES,
     decode_cursor,
     encode_cursor,
 )
@@ -746,99 +745,11 @@ class ControllerServer:
                 retryable=False,
                 suggested_action="use_a_positive_byte_budget",
             ) from error
-        if budget < 1 or budget > MAX_RESPONSE_BYTES // 2:
-            raise api_error(
-                "INVALID_MAX_BYTES",
-                f"max_bytes must be between 1 and {MAX_RESPONSE_BYTES // 2}",
-                exit_code=ExitCode.USAGE,
-                retryable=False,
-                suggested_action="use_a_supported_byte_budget",
-            )
-        try:
-            offset = decode_cursor(cursor)
-        except ValueError as error:
-            raise api_error(
-                "INVALID_CURSOR",
-                "invalid output cursor",
-                exit_code=ExitCode.USAGE,
-                retryable=False,
-                suggested_action="restart_output_read",
-            ) from error
-        raw_events = store.list_output_events(record.execution_id)
-        if offset > len(raw_events):
-            raise api_error(
-                "INVALID_CURSOR",
-                "output cursor is beyond the execution output",
-                exit_code=ExitCode.USAGE,
-                retryable=False,
-                suggested_action="restart_output_read",
-            )
-        events: list[dict[str, Any]] = []
-        used = 0
-        next_offset = offset
-        for index, event in enumerate(raw_events[offset:], start=offset):
-            public = self._public_output_event(index, event)
-            encoded_size = len(
-                json.dumps(
-                    public,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-            )
-            if events and used + encoded_size > budget:
-                break
-            if not events and encoded_size > budget:
-                # Milestone 6 promotes oversized values to artifacts. Until
-                # then, expose a bounded prefix without advancing past bytes
-                # the caller has not seen.
-                text = public.get("text")
-                if isinstance(text, str):
-                    prefix = text.encode("utf-8")[: max(1, budget // 2)]
-                    while True:
-                        try:
-                            public["text"] = prefix.decode("utf-8")
-                            break
-                        except UnicodeDecodeError:
-                            prefix = prefix[:-1]
-                public["truncated"] = True
-            events.append(public)
-            used += min(encoded_size, budget)
-            next_offset = index + 1
-            if used >= budget:
-                break
-        has_more = next_offset < len(raw_events)
-        result: dict[str, Any] = {
-            "execution_id": record.execution_id,
-            "events": events,
-            "has_more": has_more,
-            "output_complete": record.output_complete,
-        }
-        if has_more:
-            result["next_cursor"] = encode_cursor(next_offset)
-        return result
-
-    @staticmethod
-    def _public_output_event(
-        index: int,
-        event: dict[str, Any],
-    ) -> dict[str, Any]:
-        event_type = str(event.get("event_type") or "unknown")
-        result: dict[str, Any] = {
-            "cursor": encode_cursor(index),
-            "event_type": event_type,
-        }
-        if event_type == "stream":
-            result["stream"] = str(event.get("stream") or "stdout")
-            result["text"] = str(event.get("text") or "")
-        elif event_type == "error":
-            traceback = event.get("traceback")
-            result["text"] = "\n".join(traceback or [])
-        elif event_type in {"display_data", "execute_result"}:
-            data = event.get("data")
-            if isinstance(data, dict) and "text/plain" in data:
-                result["mime_type"] = "text/plain"
-                result["text"] = str(data["text/plain"])
-        return result
+        return store.read_output_page(
+            record.execution_id,
+            cursor=cursor,
+            max_bytes=budget,
+        ).to_wire()
 
     @staticmethod
     def _execution_topic(profile: ProfileSpec, execution_id: str) -> str:

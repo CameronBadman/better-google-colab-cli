@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import base64
 import hashlib
 import json
 import math
@@ -21,12 +22,23 @@ from better_colab.errors import ExitCode, api_error
 from better_colab.models import (
     Artifact,
     ExecutionState,
+    OutputEvent,
+    OutputPage,
     PruneResult,
     PublicModel,
 )
+from better_colab.protocol import (
+    MAX_OUTPUT_PAGE_BYTES,
+    MIN_OUTPUT_PAGE_BYTES,
+    decode_cursor,
+    encode_cursor,
+)
 
 
-DATABASE_SCHEMA_VERSION = 2
+DATABASE_SCHEMA_VERSION = 3
+OUTPUT_CHUNK_BYTES = 512
+LARGE_MIME_ARTIFACT_BYTES = 32 * 1024
+OUTPUT_ARTIFACT_THRESHOLD_BYTES = 64 * 1024
 TERMINAL_STATES = frozenset(
     {
         ExecutionState.FINISHED,
@@ -272,6 +284,10 @@ class ExecutionRecord(PublicModel):
     idle_received: bool
     completion_source: str | None = None
     output_complete: bool
+    output_spool_path: str | None = None
+    output_byte_size: int = 0
+    output_sha256: str | None = None
+    output_finalized_at: str | None = None
     execution_timeout_seconds: float | None = None
     execution_deadline: str | None = None
     cancel_requested: bool
@@ -470,6 +486,13 @@ ALTER TABLE executions ADD COLUMN interrupt_requested_state TEXT;
 ALTER TABLE executions ADD COLUMN reply_status TEXT;
 """
 
+MIGRATION_3 = """
+ALTER TABLE executions ADD COLUMN output_spool_path TEXT;
+ALTER TABLE executions ADD COLUMN output_byte_size INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE executions ADD COLUMN output_sha256 TEXT;
+ALTER TABLE executions ADD COLUMN output_finalized_at TEXT;
+"""
+
 
 class DurableStore:
     """One profile view over the shared controller database."""
@@ -535,6 +558,13 @@ class DurableStore:
                     if statement.strip():
                         connection.execute(statement)
                 connection.execute("PRAGMA user_version=2")
+            current = 2
+        if current == 2:
+            with self.transaction() as connection:
+                for statement in MIGRATION_3.split(";"):
+                    if statement.strip():
+                        connection.execute(statement)
+                connection.execute("PRAGMA user_version=3")
 
     @contextlib.contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -989,6 +1019,8 @@ class DurableStore:
                    source_spool_path, state, kernel_message_id,
                    dispatch_confirmed, reply_received, idle_received,
                    completion_source, output_complete,
+                   output_spool_path, output_byte_size, output_sha256,
+                   output_finalized_at,
                    execution_timeout_seconds, execution_deadline,
                    cancel_requested, interrupt_requested_state, reply_status,
                    reconnect_count, error_name, error_value, traceback_json,
@@ -1170,6 +1202,14 @@ class DurableStore:
                     },
                 )
             discard_source = to_state in TERMINAL_STATES
+            if discard_source and current.output_finalized_at is None:
+                raise api_error(
+                    "OUTPUT_NOT_FINALIZED",
+                    "Output spool must be finalized before a terminal transition",
+                    exit_code=ExitCode.CONFLICT,
+                    retryable=False,
+                    suggested_action="finalize_execution_output",
+                )
             if discard_source:
                 # Safety wins over replayability if the process crashes before
                 # the following transaction commits.
@@ -1346,6 +1386,7 @@ class DurableStore:
                     SET state = ?, cancel_requested = 1,
                         interrupt_requested_state = ?,
                         source_spool_path = NULL, completion_source = ?,
+                        output_sha256 = ?, output_finalized_at = ?,
                         completed_at = ?, updated_at = ?
                     WHERE execution_id = ?
                     """,
@@ -1353,6 +1394,8 @@ class DurableStore:
                         ExecutionState.INTERRUPTED.value,
                         ExecutionState.INTERRUPTED.value,
                         "live",
+                        self.sha256(b""),
+                        now,
                         now,
                         now,
                         execution_id,
@@ -1408,48 +1451,371 @@ class DurableStore:
         self,
         execution_id: str,
         event: dict[str, Any],
-    ) -> int:
+    ) -> list[int]:
         event_type = str(event.get("event_type") or "")
         if not event_type:
             raise ValueError("output event_type is required")
-        metadata = json.dumps(
-            event,
+        if event_type == "stream":
+            return self._append_text_output(
+                execution_id,
+                event_type=event_type,
+                text=str(event.get("text") or ""),
+                metadata={"stream": str(event.get("stream") or "stdout")},
+                stream_name=str(event.get("stream") or "stdout"),
+            )
+        if event_type == "error":
+            traceback = event.get("traceback")
+            lines = (
+                traceback
+                if isinstance(traceback, list)
+                and all(isinstance(line, str) for line in traceback)
+                else []
+            )
+            return self._append_text_output(
+                execution_id,
+                event_type=event_type,
+                text="\n".join(lines),
+                metadata={
+                    "error_name": str(event.get("error_name") or "Error"),
+                    "error_value": str(event.get("error_value") or ""),
+                    "traceback": lines,
+                },
+            )
+        if event_type in {
+            "display_data",
+            "execute_result",
+            "update_display_data",
+        }:
+            return self._append_mime_output(
+                execution_id,
+                event_type=event_type,
+                event=event,
+            )
+        metadata = {
+            key: value
+            for key, value in event.items()
+            if key != "event_type"
+        }
+        return [
+            self._append_output_index(
+                execution_id,
+                event_type=event_type,
+                metadata=metadata,
+            )
+        ]
+
+    @staticmethod
+    def _split_utf8(text: str) -> list[bytes]:
+        data = text.encode("utf-8")
+        if not data:
+            return [b""]
+        chunks: list[bytes] = []
+        start = 0
+        while start < len(data):
+            end = min(start + OUTPUT_CHUNK_BYTES, len(data))
+            if end < len(data):
+                while end > start and data[end] & 0b1100_0000 == 0b1000_0000:
+                    end -= 1
+            if end == start:
+                end = min(start + OUTPUT_CHUNK_BYTES, len(data))
+            chunks.append(data[start:end])
+            start = end
+        return chunks
+
+    def _next_output_sequence(
+        self,
+        connection: sqlite3.Connection,
+        execution_id: str,
+    ) -> int:
+        row = connection.execute(
+            """
+            SELECT COALESCE(MAX(sequence), -1) + 1 AS sequence
+            FROM output_chunks WHERE execution_id = ?
+            """,
+            (execution_id,),
+        ).fetchone()
+        return int(row["sequence"])
+
+    @staticmethod
+    def _metadata_json(metadata: dict[str, Any]) -> str:
+        return json.dumps(
+            metadata,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
         )
+
+    def _append_text_output(
+        self,
+        execution_id: str,
+        *,
+        event_type: str,
+        text: str,
+        metadata: dict[str, Any],
+        stream_name: str | None = None,
+        mime_type: str | None = None,
+        display_id: str | None = None,
+    ) -> list[int]:
+        chunks = self._split_utf8(text)
+        rollback_path: Path | None = None
+        rollback_offset = 0
+        try:
+            with self.transaction() as connection:
+                record = self._require_execution(connection, execution_id)
+                if record.output_finalized_at is not None:
+                    raise api_error(
+                        "OUTPUT_FINALIZED",
+                        "Cannot append output after finalization",
+                        exit_code=ExitCode.CONFLICT,
+                        retryable=False,
+                        suggested_action="refresh_execution_status",
+                    )
+                path = (
+                    Path(record.output_spool_path)
+                    if record.output_spool_path
+                    else self.paths.outputs_dir / f"{execution_id}.text"
+                )
+                rollback_path = path
+                rollback_offset = record.output_byte_size
+                descriptor = os.open(
+                    path,
+                    os.O_CREAT | os.O_RDWR,
+                    0o600,
+                )
+                try:
+                    os.fchmod(descriptor, 0o600)
+                    os.ftruncate(descriptor, rollback_offset)
+                    os.lseek(descriptor, rollback_offset, os.SEEK_SET)
+                    for chunk in chunks:
+                        view = memoryview(chunk)
+                        while view:
+                            written = os.write(descriptor, view)
+                            view = view[written:]
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+
+                first_sequence = self._next_output_sequence(
+                    connection,
+                    execution_id,
+                )
+                offset = rollback_offset
+                now = self._time()
+                sequences: list[int] = []
+                for position, chunk in enumerate(chunks):
+                    sequence = first_sequence + position
+                    sequences.append(sequence)
+                    chunk_metadata = metadata if position == 0 else {
+                        key: value
+                        for key, value in metadata.items()
+                        if key not in {"traceback", "error_name", "error_value"}
+                    }
+                    connection.execute(
+                        """
+                        INSERT INTO output_chunks (
+                            execution_id, sequence, event_type, stream_name,
+                            mime_type, spool_offset, byte_length, display_id,
+                            metadata_json, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            execution_id,
+                            sequence,
+                            event_type,
+                            stream_name,
+                            mime_type,
+                            offset,
+                            len(chunk),
+                            display_id,
+                            self._metadata_json(chunk_metadata),
+                            now,
+                        ),
+                    )
+                    offset += len(chunk)
+                connection.execute(
+                    """
+                    UPDATE executions
+                    SET output_spool_path = ?, output_byte_size = ?,
+                        updated_at = ?
+                    WHERE execution_id = ?
+                    """,
+                    (str(path), offset, now, execution_id),
+                )
+                return sequences
+        except BaseException:
+            if rollback_path is not None and rollback_path.exists():
+                with contextlib.suppress(OSError):
+                    with rollback_path.open("r+b") as file:
+                        file.truncate(rollback_offset)
+                        file.flush()
+                        os.fsync(file.fileno())
+            raise
+
+    def _append_mime_output(
+        self,
+        execution_id: str,
+        *,
+        event_type: str,
+        event: dict[str, Any],
+    ) -> list[int]:
+        data = event.get("data")
+        representations = data if isinstance(data, dict) else {}
+        display_id = (
+            str(event["display_id"])
+            if event.get("display_id") is not None
+            else None
+        )
+        common = {
+            "execution_count": event.get("execution_count"),
+            "metadata": (
+                event.get("metadata")
+                if isinstance(event.get("metadata"), dict)
+                else {}
+            ),
+        }
+        sequences: list[int] = []
+        if not representations:
+            return [
+                self._append_output_index(
+                    execution_id,
+                    event_type=event_type,
+                    metadata=common,
+                    display_id=display_id,
+                )
+            ]
+        for mime_type, value in representations.items():
+            mime = str(mime_type)
+            if self._is_text_mime(mime):
+                text = (
+                    value
+                    if isinstance(value, str)
+                    else json.dumps(
+                        value,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
+                encoded = text.encode("utf-8")
+                if len(encoded) <= LARGE_MIME_ARTIFACT_BYTES:
+                    sequences.extend(
+                        self._append_text_output(
+                            execution_id,
+                            event_type=event_type,
+                            text=text,
+                            metadata=common,
+                            mime_type=mime,
+                            display_id=display_id,
+                        )
+                    )
+                    continue
+                artifact_data = encoded
+            else:
+                artifact_data = self._decode_binary_representation(value)
+            artifact = self.create_artifact(
+                execution_id=execution_id,
+                data=artifact_data,
+                media_type=mime,
+                purpose="mime_output",
+            )
+            artifact_id = self.connection.execute(
+                "SELECT artifact_id FROM artifacts WHERE path = ?",
+                (artifact.path,),
+            ).fetchone()["artifact_id"]
+            sequences.append(
+                self._append_output_index(
+                    execution_id,
+                    event_type=event_type,
+                    metadata=common,
+                    mime_type=mime,
+                    artifact_id=artifact_id,
+                    display_id=display_id,
+                )
+            )
+        return sequences
+
+    @staticmethod
+    def _is_text_mime(mime_type: str) -> bool:
+        return (
+            mime_type.startswith("text/")
+            or mime_type
+            in {
+                "application/json",
+                "application/javascript",
+                "application/xml",
+                "image/svg+xml",
+            }
+            or mime_type.endswith("+json")
+            or mime_type.endswith("+xml")
+        )
+
+    @staticmethod
+    def _decode_binary_representation(value: Any) -> bytes:
+        if isinstance(value, str):
+            try:
+                return base64.b64decode(value, validate=True)
+            except ValueError:
+                return value.encode("utf-8")
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+    def _append_output_index(
+        self,
+        execution_id: str,
+        *,
+        event_type: str,
+        metadata: dict[str, Any],
+        stream_name: str | None = None,
+        mime_type: str | None = None,
+        artifact_id: str | None = None,
+        display_id: str | None = None,
+    ) -> int:
         with self.transaction() as connection:
-            self._require_execution(connection, execution_id)
-            row = connection.execute(
-                """
-                SELECT COALESCE(MAX(sequence), -1) + 1 AS sequence
-                FROM output_chunks WHERE execution_id = ?
-                """,
-                (execution_id,),
-            ).fetchone()
-            sequence = int(row["sequence"])
+            record = self._require_execution(connection, execution_id)
+            if record.output_finalized_at is not None:
+                raise api_error(
+                    "OUTPUT_FINALIZED",
+                    "Cannot append output after finalization",
+                    exit_code=ExitCode.CONFLICT,
+                    retryable=False,
+                    suggested_action="refresh_execution_status",
+                )
+            sequence = self._next_output_sequence(connection, execution_id)
             connection.execute(
                 """
                 INSERT INTO output_chunks (
                     execution_id, sequence, event_type, stream_name,
-                    mime_type, display_id, metadata_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    mime_type, artifact_id, display_id, metadata_json,
+                    created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     execution_id,
                     sequence,
                     event_type,
-                    event.get("stream"),
-                    event.get("mime_type"),
-                    event.get("display_id"),
-                    metadata,
+                    stream_name,
+                    mime_type,
+                    artifact_id,
+                    display_id,
+                    self._metadata_json(metadata),
                     self._time(),
                 ),
             )
         return sequence
 
     def list_output_events(self, execution_id: str) -> list[dict[str, Any]]:
-        if self.get_execution(execution_id) is None:
+        return [
+            event.to_wire()
+            for event in self._read_all_output_events(execution_id)
+        ]
+
+    def _read_all_output_events(self, execution_id: str) -> list[OutputEvent]:
+        record = self.get_execution(execution_id)
+        if record is None:
             raise api_error(
                 "EXECUTION_NOT_FOUND",
                 f"Execution not found: {execution_id}",
@@ -1459,12 +1825,339 @@ class DurableStore:
             )
         rows = self.connection.execute(
             """
-            SELECT metadata_json FROM output_chunks
-            WHERE execution_id = ? ORDER BY sequence
+            SELECT chunks.sequence, chunks.event_type, chunks.stream_name,
+                   chunks.mime_type, chunks.spool_offset, chunks.byte_length,
+                   chunks.display_id, chunks.metadata_json,
+                   artifacts.path AS artifact_path,
+                   artifacts.media_type AS artifact_media_type,
+                   artifacts.byte_size AS artifact_byte_size,
+                   artifacts.sha256 AS artifact_sha256,
+                   artifacts.purpose AS artifact_purpose
+            FROM output_chunks AS chunks
+            LEFT JOIN artifacts
+              ON artifacts.artifact_id = chunks.artifact_id
+            WHERE chunks.execution_id = ?
+            ORDER BY chunks.sequence
             """,
             (execution_id,),
         )
-        return [json.loads(row["metadata_json"]) for row in rows]
+        return [self._output_event_from_row(record, row) for row in rows]
+
+    def _output_event_from_row(
+        self,
+        record: ExecutionRecord,
+        row: sqlite3.Row,
+    ) -> OutputEvent:
+        metadata = (
+            json.loads(row["metadata_json"])
+            if row["metadata_json"]
+            else {}
+        )
+        text: str | None = None
+        if row["spool_offset"] is not None and row["byte_length"] is not None:
+            if not record.output_spool_path:
+                raise api_error(
+                    "OUTPUT_SPOOL_MISSING",
+                    "Output index references a missing spool",
+                    exit_code=ExitCode.UNAVAILABLE,
+                    retryable=False,
+                    suggested_action="inspect_local_state",
+                )
+            with Path(record.output_spool_path).open("rb") as spool:
+                spool.seek(row["spool_offset"])
+                data = spool.read(row["byte_length"])
+            if len(data) != row["byte_length"]:
+                raise api_error(
+                    "OUTPUT_SPOOL_INCOMPLETE",
+                    "Output spool is shorter than its durable index",
+                    exit_code=ExitCode.UNAVAILABLE,
+                    retryable=False,
+                    suggested_action="inspect_local_state",
+                )
+            text = data.decode("utf-8")
+        elif "text" in metadata:
+            # Read compatibility for schema-v1 inline development records.
+            text = str(metadata.pop("text"))
+        artifact = (
+            Artifact(
+                path=row["artifact_path"],
+                media_type=row["artifact_media_type"],
+                byte_size=row["artifact_byte_size"],
+                sha256=row["artifact_sha256"],
+                purpose=row["artifact_purpose"],
+            )
+            if row["artifact_path"] is not None
+            else None
+        )
+        traceback = metadata.get("traceback")
+        return OutputEvent(
+            cursor=encode_cursor(row["sequence"]),
+            event_type=row["event_type"],
+            text=text,
+            stream=row["stream_name"] or metadata.get("stream"),
+            mime_type=row["mime_type"],
+            artifact=artifact,
+            display_id=row["display_id"],
+            execution_count=metadata.get("execution_count"),
+            metadata=(
+                metadata.get("metadata")
+                if isinstance(metadata.get("metadata"), dict)
+                else None
+            ),
+            error_name=metadata.get("error_name"),
+            error_value=metadata.get("error_value"),
+            traceback=traceback if isinstance(traceback, list) else None,
+            wait=metadata.get("wait"),
+        )
+
+    def read_output_page(
+        self,
+        execution_id: str,
+        *,
+        cursor: str | None,
+        max_bytes: int,
+    ) -> OutputPage:
+        if max_bytes < MIN_OUTPUT_PAGE_BYTES:
+            raise api_error(
+                "OUTPUT_PAGE_BUDGET_TOO_SMALL",
+                f"max_bytes must be at least {MIN_OUTPUT_PAGE_BYTES}",
+                exit_code=ExitCode.USAGE,
+                retryable=False,
+                suggested_action="increase_max_bytes",
+            )
+        if max_bytes > MAX_OUTPUT_PAGE_BYTES:
+            raise api_error(
+                "INVALID_MAX_BYTES",
+                f"max_bytes cannot exceed {MAX_OUTPUT_PAGE_BYTES}",
+                exit_code=ExitCode.USAGE,
+                retryable=False,
+                suggested_action="use_a_supported_byte_budget",
+            )
+        try:
+            offset = decode_cursor(cursor)
+        except ValueError as error:
+            raise api_error(
+                "INVALID_CURSOR",
+                "invalid output cursor",
+                exit_code=ExitCode.USAGE,
+                retryable=False,
+                suggested_action="restart_output_read",
+            ) from error
+        record = self.get_execution(execution_id)
+        if record is None:
+            raise api_error(
+                "EXECUTION_NOT_FOUND",
+                f"Execution not found: {execution_id}",
+                exit_code=ExitCode.NOT_FOUND,
+                retryable=False,
+                suggested_action="list_executions",
+            )
+        rows = self.connection.execute(
+            """
+            SELECT chunks.sequence, chunks.event_type, chunks.stream_name,
+                   chunks.mime_type, chunks.spool_offset, chunks.byte_length,
+                   chunks.display_id, chunks.metadata_json,
+                   artifacts.path AS artifact_path,
+                   artifacts.media_type AS artifact_media_type,
+                   artifacts.byte_size AS artifact_byte_size,
+                   artifacts.sha256 AS artifact_sha256,
+                   artifacts.purpose AS artifact_purpose
+            FROM output_chunks AS chunks
+            LEFT JOIN artifacts
+              ON artifacts.artifact_id = chunks.artifact_id
+            WHERE chunks.execution_id = ? AND chunks.sequence >= ?
+            ORDER BY chunks.sequence
+            """,
+            (execution_id, offset),
+        )
+        first_row = rows.fetchone()
+        if first_row is None:
+            maximum = self.connection.execute(
+                """
+                SELECT COALESCE(MAX(sequence), -1) AS maximum
+                FROM output_chunks WHERE execution_id = ?
+                """,
+                (execution_id,),
+            ).fetchone()["maximum"]
+            if offset > maximum + 1:
+                raise api_error(
+                    "INVALID_CURSOR",
+                    "output cursor is beyond the execution output",
+                    exit_code=ExitCode.USAGE,
+                    retryable=False,
+                    suggested_action="restart_output_read",
+                )
+        events: list[OutputEvent] = []
+        used = 0
+        next_sequence = offset
+        has_more = False
+        row = first_row
+        while row is not None:
+            event = self._output_event_from_row(record, row)
+            size = len(
+                json.dumps(
+                    event.to_wire(),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+            if events and used + size > max_bytes:
+                has_more = True
+                break
+            if not events and size > max_bytes:
+                raise api_error(
+                    "OUTPUT_EVENT_TOO_LARGE",
+                    "One output event exceeds the requested page budget",
+                    exit_code=ExitCode.USAGE,
+                    retryable=False,
+                    suggested_action="increase_max_bytes",
+                    details={"event_bytes": size},
+                )
+            events.append(event)
+            used += size
+            next_sequence = row["sequence"] + 1
+            row = rows.fetchone()
+        return OutputPage(
+            execution_id=execution_id,
+            events=events,
+            next_cursor=encode_cursor(next_sequence) if has_more else None,
+            has_more=has_more,
+            output_complete=record.output_complete,
+        )
+
+    def finalize_output(self, execution_id: str) -> list[Artifact]:
+        record = self.get_execution(execution_id)
+        if record is None:
+            raise api_error(
+                "EXECUTION_NOT_FOUND",
+                f"Execution not found: {execution_id}",
+                exit_code=ExitCode.NOT_FOUND,
+                retryable=False,
+                suggested_action="list_executions",
+            )
+        existing = self._artifacts_for_execution(
+            execution_id,
+            purpose="complete_text_output",
+        )
+        if record.output_finalized_at is not None:
+            for artifact in existing:
+                self._ensure_artifact_output_index(execution_id, artifact)
+            return existing
+        byte_size = 0
+        digest = self.sha256(b"")
+        spool_path: Path | None = None
+        if record.output_spool_path:
+            spool_path = Path(record.output_spool_path)
+            with spool_path.open("rb") as spool:
+                os.fsync(spool.fileno())
+                digest = hashlib.file_digest(spool, "sha256").hexdigest()
+            byte_size = spool_path.stat().st_size
+            if byte_size != record.output_byte_size:
+                raise api_error(
+                    "OUTPUT_SPOOL_INCOMPLETE",
+                    "Output spool size does not match its durable index",
+                    exit_code=ExitCode.UNAVAILABLE,
+                    retryable=False,
+                    suggested_action="inspect_local_state",
+                )
+        if (
+            byte_size > OUTPUT_ARTIFACT_THRESHOLD_BYTES
+            and not existing
+            and spool_path is not None
+        ):
+            existing = [
+                self.create_artifact_from_file(
+                    execution_id=execution_id,
+                    source=spool_path,
+                    media_type="text/plain; charset=utf-8",
+                    purpose="complete_text_output",
+                )
+            ]
+        for artifact in existing:
+            self._ensure_artifact_output_index(execution_id, artifact)
+        with self.transaction() as connection:
+            current = self._require_execution(connection, execution_id)
+            if current.output_finalized_at is None:
+                connection.execute(
+                    """
+                    UPDATE executions
+                    SET output_sha256 = ?, output_finalized_at = ?,
+                        updated_at = ?
+                    WHERE execution_id = ?
+                    """,
+                    (
+                        digest,
+                        self._time(),
+                        self._time(),
+                        execution_id,
+                    ),
+                )
+        return existing
+
+    def _ensure_artifact_output_index(
+        self,
+        execution_id: str,
+        artifact: Artifact,
+    ) -> None:
+        with self.transaction() as connection:
+            self._require_execution(connection, execution_id)
+            artifact_row = connection.execute(
+                """
+                SELECT artifact_id FROM artifacts
+                WHERE execution_id = ? AND path = ?
+                """,
+                (execution_id, artifact.path),
+            ).fetchone()
+            if artifact_row is None:
+                raise api_error(
+                    "ARTIFACT_NOT_FOUND",
+                    "Execution artifact metadata is missing",
+                    exit_code=ExitCode.UNAVAILABLE,
+                    retryable=False,
+                    suggested_action="inspect_local_state",
+                )
+            artifact_id = artifact_row["artifact_id"]
+            indexed = connection.execute(
+                """
+                SELECT 1 FROM output_chunks
+                WHERE execution_id = ? AND artifact_id = ?
+                """,
+                (execution_id, artifact_id),
+            ).fetchone()
+            if indexed is not None:
+                return
+            sequence = self._next_output_sequence(connection, execution_id)
+            connection.execute(
+                """
+                INSERT INTO output_chunks (
+                    execution_id, sequence, event_type, artifact_id,
+                    metadata_json, created_at
+                ) VALUES (?, ?, 'artifact', ?, '{}', ?)
+                """,
+                (execution_id, sequence, artifact_id, self._time()),
+            )
+
+    def _artifacts_for_execution(
+        self,
+        execution_id: str,
+        *,
+        purpose: str | None = None,
+    ) -> list[Artifact]:
+        parameters: list[Any] = [execution_id]
+        purpose_clause = ""
+        if purpose is not None:
+            purpose_clause = " AND purpose = ?"
+            parameters.append(purpose)
+        rows = self.connection.execute(
+            f"""
+            SELECT path, media_type, byte_size, sha256, purpose
+            FROM artifacts
+            WHERE execution_id = ? {purpose_clause}
+            ORDER BY artifact_id
+            """,
+            parameters,
+        )
+        return [Artifact.model_validate(dict(row)) for row in rows]
 
     def list_executions(
         self,
@@ -1648,6 +2341,90 @@ class DurableStore:
             purpose=purpose,
         )
 
+    def create_artifact_from_file(
+        self,
+        *,
+        execution_id: str,
+        source: Path,
+        media_type: str,
+        purpose: str | None = None,
+    ) -> Artifact:
+        if self.get_execution(execution_id) is None:
+            raise api_error(
+                "EXECUTION_NOT_FOUND",
+                f"Execution not found: {execution_id}",
+                exit_code=ExitCode.NOT_FOUND,
+                retryable=False,
+                suggested_action="list_executions",
+            )
+        artifact_id = str(uuid.uuid4())
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=f".{artifact_id}.",
+            dir=self.paths.artifacts_dir,
+        )
+        temporary_path = Path(temporary)
+        destination = self.paths.artifacts_dir / artifact_id
+        digest = hashlib.sha256()
+        byte_size = 0
+        try:
+            os.fchmod(descriptor, 0o600)
+            with source.open("rb") as input_file, os.fdopen(
+                descriptor,
+                "wb",
+            ) as output_file:
+                while chunk := input_file.read(1024 * 1024):
+                    output_file.write(chunk)
+                    digest.update(chunk)
+                    byte_size += len(chunk)
+                output_file.flush()
+                os.fsync(output_file.fileno())
+            os.replace(temporary_path, destination)
+            destination.chmod(0o600)
+            directory_descriptor = os.open(
+                self.paths.artifacts_dir,
+                os.O_RDONLY,
+            )
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
+            checksum = f"sha256:{digest.hexdigest()}"
+            with self.transaction() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO artifacts (
+                        artifact_id, profile_id, execution_id, path, media_type,
+                        byte_size, sha256, purpose, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        artifact_id,
+                        self.profile.profile_id,
+                        execution_id,
+                        str(destination),
+                        media_type,
+                        byte_size,
+                        checksum,
+                        purpose,
+                        self._time(),
+                    ),
+                )
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+            with contextlib.suppress(OSError):
+                temporary_path.unlink()
+            with contextlib.suppress(OSError):
+                destination.unlink()
+            raise
+        return Artifact(
+            path=str(destination),
+            media_type=media_type,
+            byte_size=byte_size,
+            sha256=checksum,
+            purpose=purpose,
+        )
+
     def prune_executions(
         self,
         *,
@@ -1670,7 +2447,7 @@ class DurableStore:
         rows = list(
             self.connection.execute(
                 f"""
-                SELECT execution_id FROM executions
+                SELECT execution_id, output_spool_path FROM executions
                 WHERE profile_id = ?
                   AND state IN ({placeholders})
                   AND updated_at < ?
@@ -1681,6 +2458,11 @@ class DurableStore:
             )
         )
         execution_ids = [row["execution_id"] for row in rows]
+        output_spool_paths = [
+            row["output_spool_path"]
+            for row in rows
+            if row["output_spool_path"] is not None
+        ]
         if execution_ids:
             artifact_placeholders = ",".join("?" for _ in execution_ids)
             artifact_rows = list(
@@ -1731,6 +2513,9 @@ class DurableStore:
         for row in artifact_rows:
             with contextlib.suppress(FileNotFoundError):
                 Path(row["path"]).unlink()
+        for path in output_spool_paths:
+            with contextlib.suppress(FileNotFoundError):
+                Path(path).unlink()
         return PruneResult(
             dry_run=False,
             matched=len(execution_ids),
@@ -1778,6 +2563,7 @@ class DurableStore:
                 ExecutionState.DISPATCHING,
                 ExecutionState.DISCONNECTED,
             }:
+                self.finalize_output(execution_id)
                 self.transition_execution(
                     execution_id,
                     ExecutionState.UNKNOWN,

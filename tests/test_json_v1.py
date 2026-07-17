@@ -51,6 +51,8 @@ def test_capabilities_are_bounded_and_cursor_paged():
     assert len(first.commands) == DEFAULT_EXECUTION_LIMIT
     assert first.next_cursor is not None
     assert first == repeated
+    assert first.limits.output_page_min_bytes == 512
+    assert first.limits.output_page_max_bytes == MAX_RESPONSE_BYTES // 2
     assert {item.name for item in first.commands}.isdisjoint(
         item.name for item in second.commands
     )

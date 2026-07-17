@@ -4,6 +4,8 @@ status: implemented
 last_updated: 2026-07-17
 change_log:
   - date: 2026-07-17
+    summary: Migrated to schema version 3 for indexed text-spool paths, committed byte counts, terminal output hashes, and finalization timestamps.
+  - date: 2026-07-17
     summary: Migrated to schema version 2 for execution timeout, interrupt intent, and reply-status evidence used by durable kernel workers.
   - date: 2026-07-17
     summary: Added schema migration, profile isolation, one-time legacy import, durable transition records, protected source spools, batches, artifacts, and confirmed pruning.
@@ -14,7 +16,7 @@ change_log:
 Better Colab's authoritative local state is
 `${XDG_STATE_HOME:-~/.local/state}/better-colab/controller.sqlite3`. The
 database uses WAL, foreign keys, a 5000 ms busy timeout, `synchronous=FULL`,
-explicit `BEGIN IMMEDIATE` transactions, and `PRAGMA user_version=2`.
+explicit `BEGIN IMMEDIATE` transactions, and `PRAGMA user_version=3`.
 
 The database and payload files are mode `0600`. Better Colab's state, artifact,
 source, output, and runtime directories are mode `0700`. The fallback Unix
@@ -38,7 +40,8 @@ Version 1 creates the core tables:
 Migration 2 adds the requested execution-timeout duration, persisted interrupt
 terminal intent, and validated execute-reply status. New databases apply the
 same ordered migrations as existing databases rather than maintaining a
-separate creation schema.
+separate creation schema. Migration 3 adds the execution-local text-spool
+path, committed byte count, SHA-256, and finalization timestamp.
 
 Session deletion does not own or cascade execution history. Execution pruning
 does cascade its journal, output index, batch membership, and artifact
@@ -85,11 +88,12 @@ Only `finished`, `error`, `interrupted`, `timed_out`, and `unknown` records
 strictly older than the cutoff match. A session filter is optional. Preview
 returns execution IDs and total artifact bytes. Confirmed deletion removes the
 same precomputed records transactionally and unlinks only their enumerated
-artifact paths.
+artifact and output-spool paths.
 
 ## Testing strategy
 
-- Inspect every required pragma, table, schema version, and filesystem mode.
+- Inspect every required pragma, table, schema version, migration, and
+  filesystem mode.
 - Open two profile views over one database and assert isolation.
 - Import legacy state, mutate the source JSON, reopen, and assert diagnostic
   without re-import.
