@@ -260,6 +260,15 @@ class NotebookIdsResult(PublicModel):
     assigned: list[str]
 
 
+class NotebookWriteResult(PublicModel):
+    execution_id: str
+    notebook_id: str
+    path: str
+    cell_id: str
+    notebook_sha256: str
+    outputs_written: int
+
+
 class PruneResult(PublicModel):
     dry_run: bool
     matched: int

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import copy
+import base64
 import hashlib
+import json
 import os
 import stat
 import tempfile
@@ -20,6 +22,7 @@ from better_colab.models import (
     NotebookCellSummary,
     NotebookCellsResult,
     NotebookIdsResult,
+    NotebookWriteResult,
 )
 from better_colab.protocol import (
     DEFAULT_NOTEBOOK_CELL_LIMIT,
@@ -378,4 +381,284 @@ class NotebookDocument:
             path=str(self.path),
             notebook_sha256=new_hash,
             assigned=assigned,
+        )
+
+    @staticmethod
+    def _artifact_value(event: dict[str, Any]) -> Any:
+        artifact = event.get("artifact")
+        if not isinstance(artifact, dict):
+            return event.get("text", "")
+        path = Path(str(artifact.get("path") or ""))
+        try:
+            data = path.read_bytes()
+        except OSError as error:
+            raise api_error(
+                "OUTPUT_ARTIFACT_UNREADABLE",
+                f"Could not read execution artifact: {path}",
+                exit_code=ExitCode.UNAVAILABLE,
+                retryable=False,
+                suggested_action="inspect_execution_artifacts",
+            ) from error
+        expected_size = artifact.get("byte_size")
+        expected_hash = str(artifact.get("sha256") or "")
+        actual_hash = f"sha256:{hashlib.sha256(data).hexdigest()}"
+        if expected_size != len(data) or expected_hash != actual_hash:
+            raise api_error(
+                "OUTPUT_ARTIFACT_CORRUPT",
+                f"Execution artifact failed checksum validation: {path}",
+                exit_code=ExitCode.UNAVAILABLE,
+                retryable=False,
+                suggested_action="inspect_execution_artifacts",
+            )
+        mime_type = str(event.get("mime_type") or artifact.get("media_type") or "")
+        if (
+            mime_type.startswith("text/")
+            or mime_type in {
+                "application/javascript",
+                "application/xml",
+                "image/svg+xml",
+            }
+            or mime_type.endswith("+xml")
+        ):
+            return data.decode("utf-8")
+        if mime_type == "application/json" or mime_type.endswith("+json"):
+            return json.loads(data.decode("utf-8"))
+        return base64.b64encode(data).decode("ascii")
+
+    @classmethod
+    def _notebook_outputs(cls, events: list[dict[str, Any]]) -> list[Any]:
+        outputs: list[Any] = []
+        pending_clear = False
+        position = 0
+        while position < len(events):
+            event = events[position]
+            event_type = str(event.get("event_type") or "")
+            artifact = event.get("artifact")
+            if (
+                event_type == "artifact"
+                or (
+                    isinstance(artifact, dict)
+                    and artifact.get("purpose") == "complete_text_output"
+                )
+            ):
+                position += 1
+                continue
+            if event_type == "clear_output":
+                if event.get("wait"):
+                    pending_clear = True
+                else:
+                    outputs.clear()
+                    pending_clear = False
+                position += 1
+                continue
+            if pending_clear:
+                outputs.clear()
+                pending_clear = False
+
+            if event_type == "stream":
+                stream_name = str(event.get("stream") or "stdout")
+                text: list[str] = []
+                while (
+                    position < len(events)
+                    and events[position].get("event_type") == "stream"
+                    and str(events[position].get("stream") or "stdout")
+                    == stream_name
+                ):
+                    text.append(str(events[position].get("text") or ""))
+                    position += 1
+                outputs.append(
+                    nbformat.v4.new_output(
+                        "stream",
+                        name=stream_name,
+                        text="".join(text),
+                    )
+                )
+                continue
+
+            if event_type == "error":
+                chunks: list[str] = []
+                error_name = "Error"
+                error_value = ""
+                traceback: list[str] = []
+                while (
+                    position < len(events)
+                    and events[position].get("event_type") == "error"
+                ):
+                    current = events[position]
+                    chunks.append(str(current.get("text") or ""))
+                    error_name = str(current.get("error_name") or error_name)
+                    error_value = str(current.get("error_value") or error_value)
+                    candidate = current.get("traceback")
+                    if isinstance(candidate, list):
+                        traceback = [str(line) for line in candidate]
+                    position += 1
+                if not traceback and any(chunks):
+                    traceback = "".join(chunks).splitlines()
+                outputs.append(
+                    nbformat.v4.new_output(
+                        "error",
+                        ename=error_name,
+                        evalue=error_value,
+                        traceback=traceback,
+                    )
+                )
+                continue
+
+            if event_type in {
+                "display_data",
+                "execute_result",
+                "update_display_data",
+            }:
+                mime_type = event.get("mime_type")
+                display_id = event.get("display_id")
+                chunks: list[str] = []
+                selected = event
+                while (
+                    position < len(events)
+                    and events[position].get("event_type") == event_type
+                    and events[position].get("mime_type") == mime_type
+                    and events[position].get("display_id") == display_id
+                ):
+                    current = events[position]
+                    if current.get("artifact") is not None:
+                        selected = current
+                    chunks.append(str(current.get("text") or ""))
+                    position += 1
+                data: dict[str, Any] = {}
+                if mime_type:
+                    if selected.get("artifact") is not None:
+                        value = cls._artifact_value(selected)
+                    else:
+                        value = "".join(chunks)
+                        if (
+                            mime_type == "application/json"
+                            or str(mime_type).endswith("+json")
+                        ):
+                            value = json.loads(value)
+                    data[str(mime_type)] = value
+                output_type = (
+                    "display_data"
+                    if event_type == "update_display_data"
+                    else event_type
+                )
+                values: dict[str, Any] = {
+                    "data": data,
+                    "metadata": (
+                        event.get("metadata")
+                        if isinstance(event.get("metadata"), dict)
+                        else {}
+                    ),
+                }
+                if output_type == "execute_result":
+                    values["execution_count"] = event.get("execution_count")
+                output = nbformat.v4.new_output(output_type, **values)
+                if display_id:
+                    output["transient"] = {"display_id": str(display_id)}
+                if event_type == "update_display_data" and display_id:
+                    replaced = False
+                    for existing_index in range(len(outputs) - 1, -1, -1):
+                        transient = outputs[existing_index].get("transient", {})
+                        if transient.get("display_id") == display_id:
+                            outputs[existing_index] = output
+                            replaced = True
+                            break
+                    if not replaced:
+                        outputs.append(output)
+                else:
+                    outputs.append(output)
+                continue
+
+            position += 1
+        return outputs
+
+    def write_execution_output(
+        self,
+        *,
+        record: Any,
+        events: list[dict[str, Any]],
+    ) -> NotebookWriteResult:
+        if record.state.value not in {"finished", "error"}:
+            raise api_error(
+                "WRITEBACK_EXECUTION_NOT_TERMINAL",
+                "Notebook output requires a finished or error execution",
+                exit_code=ExitCode.CONFLICT,
+                retryable=False,
+                suggested_action="wait_for_execution",
+            )
+        if not record.output_complete:
+            raise api_error(
+                "WRITEBACK_OUTPUT_INCOMPLETE",
+                "Incomplete observed output cannot be written to a notebook",
+                exit_code=ExitCode.CONFLICT,
+                retryable=False,
+                suggested_action="inspect_execution_output",
+            )
+        if (
+            record.source_kind != "notebook_cell"
+            or record.notebook_id is None
+            or record.cell_id is None
+        ):
+            raise api_error(
+                "WRITEBACK_PROVENANCE_REQUIRED",
+                "Execution did not capture identified notebook-cell provenance",
+                exit_code=ExitCode.CONFLICT,
+                retryable=False,
+                suggested_action="execute_an_identified_notebook_cell",
+            )
+        if self.notebook_id != record.notebook_id:
+            raise api_error(
+                "NOTEBOOK_IDENTITY_MISMATCH",
+                "Notebook path identity changed since execution",
+                exit_code=ExitCode.CONFLICT,
+                retryable=False,
+                suggested_action="restore_original_notebook_path",
+            )
+        notebook, _notebook_sha256 = self._snapshot()
+        self._require_unique_ids(notebook)
+        if self._missing_id_indexes(notebook):
+            raise api_error(
+                "MISSING_CELL_IDS",
+                "Assign missing cell IDs before writing notebook output",
+                exit_code=ExitCode.CONFLICT,
+                retryable=False,
+                suggested_action="assign_notebook_ids",
+            )
+        selected_index = self._select_index(
+            notebook,
+            cell_id=record.cell_id,
+            index=None,
+        )
+        cell = notebook.cells[selected_index]
+        source = str(cell.get("source", ""))
+        source_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()
+        if source_hash != record.source_sha256:
+            raise api_error(
+                "SOURCE_HASH_MISMATCH",
+                "Cell source changed since execution",
+                exit_code=ExitCode.CONFLICT,
+                retryable=False,
+                suggested_action="reinspect_cell",
+                details={
+                    "expected": f"sha256:{record.source_sha256}",
+                    "actual": f"sha256:{source_hash}",
+                },
+            )
+        if cell.get("cell_type") != "code":
+            raise api_error(
+                "CELL_NOT_CODE",
+                "Execution provenance no longer resolves to a code cell",
+                exit_code=ExitCode.CONFLICT,
+                retryable=False,
+                suggested_action="restore_original_cell",
+            )
+        outputs = self._notebook_outputs(events)
+        cell["outputs"] = outputs
+        new_hash = self._atomic_write(notebook)
+        return NotebookWriteResult(
+            execution_id=record.execution_id,
+            notebook_id=self.notebook_id,
+            path=str(self.path),
+            cell_id=record.cell_id,
+            notebook_sha256=new_hash,
+            outputs_written=len(outputs),
         )

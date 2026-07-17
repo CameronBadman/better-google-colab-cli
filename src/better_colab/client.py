@@ -24,6 +24,7 @@ from better_colab.models import (
     NotebookCell,
     NotebookCellsResult,
     NotebookIdsResult,
+    NotebookWriteResult,
     OutputPage,
     PruneResult,
     SessionHealthResult,
@@ -344,6 +345,32 @@ class BetterColabClient:
     ) -> NotebookIdsResult:
         return NotebookDocument(path).assign_ids(
             expected_notebook_sha256=expected_notebook_sha256,
+        )
+
+    def write_notebook_output(
+        self,
+        execution_id: str,
+    ) -> NotebookWriteResult:
+        record = self.store.get_execution(execution_id)
+        if record is None:
+            raise api_error(
+                "EXECUTION_NOT_FOUND",
+                f"Execution not found: {execution_id}",
+                exit_code=ExitCode.NOT_FOUND,
+                retryable=False,
+                suggested_action="list_executions",
+            )
+        if record.source_path is None:
+            raise api_error(
+                "WRITEBACK_PROVENANCE_REQUIRED",
+                "Execution has no original notebook path",
+                exit_code=ExitCode.CONFLICT,
+                retryable=False,
+                suggested_action="execute_an_identified_notebook_cell",
+            )
+        return NotebookDocument(record.source_path).write_execution_output(
+            record=record,
+            events=self.store.list_output_events(execution_id),
         )
 
     def close(self) -> None:

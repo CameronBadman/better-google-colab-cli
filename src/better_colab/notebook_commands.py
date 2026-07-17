@@ -16,6 +16,7 @@ from better_colab.models import (
     NotebookCell,
     NotebookCellsResult,
     NotebookIdsResult,
+    NotebookWriteResult,
 )
 from better_colab.protocol import DEFAULT_NOTEBOOK_CELL_LIMIT
 
@@ -186,6 +187,30 @@ def ids_assign_command(
             )
 
     _format_operation(output_format, operation, _render_ids)
+
+
+def _render_write(result: NotebookWriteResult) -> None:
+    typer.echo(
+        f"Wrote {result.outputs_written} output(s) to "
+        f"{result.path}#{result.cell_id}"
+    )
+
+
+@notebook_app.command(name="write-output")
+def write_output_command(
+    execution_id: Annotated[str, typer.Argument(help="Execution UUID")],
+    output_format: Annotated[
+        str,
+        typer.Option("--format", help="Output format: text or json"),
+    ] = "text",
+) -> None:
+    """Explicitly write complete guarded output to its original cell."""
+
+    def operation() -> NotebookWriteResult:
+        with _client_from_cli_state() as client:
+            return client.write_notebook_output(execution_id)
+
+    _format_operation(output_format, operation, _render_write)
 
 
 def register(app: typer.Typer) -> None:
