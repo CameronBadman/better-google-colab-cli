@@ -5,6 +5,8 @@ schema_version: 1
 last_updated: 2026-07-17
 change_log:
   - date: 2026-07-17
+    summary: Implemented the typed Python facade, JSON v1 envelopes, bounded capability discovery, cursor primitives, and flat-command JSON adapters.
+  - date: 2026-07-17
     summary: Established the unofficial fork identity, distribution boundary, and durable-interface architecture.
 ---
 
@@ -58,8 +60,27 @@ trailing newline, are capped at 262,144 bytes. Output pages default to 65,536
 bytes. Execution lists default to 20 records; notebook-cell lists default to
 100; collection pages never exceed 100 items.
 
-The typed Python layer returns the same public models without Typer, Rich, or
-terminal rendering. `execution start` never allocates a runtime:
+The implemented JSON v1 foundation lives in `better_colab.models`,
+`better_colab.protocol`, and `better_colab.errors`. Models are strict,
+immutable Pydantic values. Their wire form omits optional null/default fields,
+except for the seven session health fields, which are always present.
+`better-colab capabilities` is scoped and cursor-paged; it reports this
+contract and the complete planned durable command vocabulary without embedding
+a long manual in an agent skill. `better-colab doctor` is side-effect-free and
+does not initialize logging, authentication, controller state, or a network
+client.
+
+During migration, retained non-interactive flat session, file, and install
+commands also accept `--format json`. Their default remains human-readable
+text for upstream compatibility. JSON mode suppresses progress and kernel
+installer output, omits protected runtime tokens, and routes errors through
+the same stable envelope and exit-code mapping.
+
+The typed Python layer returns the same public models without importing Typer,
+Rich, or terminal rendering. `BetterColabClient.capabilities()` and
+`BetterColabClient.doctor()` are the first implemented operations; durable
+session/execution/notebook methods are added with their corresponding
+controller milestones. `execution start` never allocates a runtime:
 `session ensure` is the only compound operation allowed to allocate.
 
 ## Controller
@@ -166,4 +187,3 @@ cover silent success, controlled exceptions, detach/observe, controller
 restart, large output, readiness probes, and stateful notebook cells. Every
 live run ends by listing sessions, directly unassigning orphans, and verifying
 that no assignment remains.
-

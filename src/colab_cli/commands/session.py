@@ -21,6 +21,14 @@ from typing import Any, Dict, Optional
 import typer
 from typing_extensions import Annotated
 
+from better_colab.errors import ExitCode
+from better_colab.legacy import (
+    emit_error as emit_json_error,
+    emit_success as emit_json_success,
+    resolve_session as resolve_json_session,
+    session_result,
+    wants_json,
+)
 from colab_cli.client import (
     Accelerator,
     ColabRequestError,
@@ -132,10 +140,15 @@ def new(
             ),
         ),
     ] = None,
+    output_format: Annotated[
+        str,
+        typer.Option("--format", help="Output format: text or json"),
+    ] = "text",
 ):
     """Create a new session"""
     from colab_cli.common import state
 
+    json_output = wants_json(output_format)
     name = session or uuid.uuid4().hex[:6]
     variant = Variant.DEFAULT
     accelerator = Accelerator.NONE
@@ -154,7 +167,8 @@ def new(
         }
         accelerator = mapping.get(gpu.lower(), Accelerator.A100)
 
-    typer.echo(f"[colab] Creating session '{name}'...")
+    if not json_output:
+        typer.echo(f"[colab] Creating session '{name}'...")
     try:
         res = state.client.assign(
             uuid.uuid4(), variant=variant, accelerator=accelerator
@@ -166,6 +180,14 @@ def new(
         # interpret it this way when an accelerator was actually requested;
         # otherwise we re-raise so the user sees the real cause.
         if get_status_code(e) == 400 and accelerator != Accelerator.NONE:
+            if json_output:
+                emit_json_error(
+                    "ACCELERATOR_UNAVAILABLE",
+                    f"Backend rejected accelerator '{accelerator.value}'",
+                    exit_code=ExitCode.UNAVAILABLE,
+                    retryable=True,
+                    suggested_action="choose_another_accelerator",
+                )
             typer.echo(
                 f"[colab] Backend rejected accelerator '{accelerator.value}'. "
                 "You may not have quota or entitlement for this accelerator on "
@@ -174,6 +196,26 @@ def new(
                 err=True,
             )
             raise typer.Exit(code=1)
+        if json_output:
+            status_code = get_status_code(e)
+            emit_json_error(
+                "AUTHORIZATION_FAILED"
+                if status_code in {401, 403}
+                else "SESSION_ALLOCATION_FAILED",
+                "Colab rejected the session allocation request",
+                exit_code=(
+                    ExitCode.AUTH
+                    if status_code in {401, 403}
+                    else ExitCode.UNAVAILABLE
+                ),
+                retryable=status_code not in {401, 403},
+                suggested_action=(
+                    "reauthenticate"
+                    if status_code in {401, 403}
+                    else "retry_session_ensure"
+                ),
+                details={"status_code": status_code} if status_code else None,
+            )
         raise
 
     if isinstance(res, PostAssignmentResponse):
@@ -209,17 +251,25 @@ def new(
         state.client.keep_alive_assignment(endpoint)
     except ColabRequestError as e:
         if get_status_code(e) == 403 and _is_scope_error(e):
+            # Don't leak the assignment we just created.
+            try:
+                state.client.unassign(endpoint)
+            except Exception:
+                pass
+            if json_output:
+                emit_json_error(
+                    "AUTHORIZATION_FAILED",
+                    "Credentials are missing a scope required by Colab",
+                    exit_code=ExitCode.AUTH,
+                    retryable=False,
+                    suggested_action="reauthenticate",
+                )
             typer.echo(
                 "[colab] Keep-alive pre-flight failed: your credentials "
                 "are missing an OAuth scope required by Colab.\n",
                 err=True,
             )
             typer.echo(_scope_remediation_message(state.auth_provider), err=True)
-            # Don't leak the assignment we just created.
-            try:
-                state.client.unassign(endpoint)
-            except Exception:
-                pass
             raise typer.Exit(code=1)
         # Other failures: don't block session creation — the daemon will
         # retry and log via the existing keep_alive_error event path.
@@ -246,19 +296,39 @@ def new(
             "accelerator": accelerator.value,
         },
     )
-    typer.echo("[colab] Session READY.")
+    if json_output:
+        emit_json_success(session_result(s, status="ready"))
+    else:
+        typer.echo("[colab] Session READY.")
 
 
 def restart_kernel(
     session: Annotated[
         Optional[str], typer.Option("-s", "--session", help="Session name")
     ] = None,
+    output_format: Annotated[
+        str,
+        typer.Option("--format", help="Output format: text or json"),
+    ] = "text",
 ):
     """Restart a session's kernel"""
     from colab_cli.common import state
 
-    name = state.resolve_session(session)
+    json_output = wants_json(output_format)
+    name = (
+        resolve_json_session(state, session)
+        if json_output
+        else state.resolve_session(session)
+    )
     s = state.store.get(name)
+    if s is None and json_output:
+        emit_json_error(
+            "SESSION_NOT_FOUND",
+            f"Session '{name}' not found",
+            exit_code=ExitCode.NOT_FOUND,
+            retryable=False,
+            suggested_action="list_sessions",
+        )
 
     def on_started(kid):
         s.kernel_id = kid
@@ -281,32 +351,56 @@ def restart_kernel(
         runtime.restart()
     finally:
         runtime.stop()
+    if json_output:
+        emit_json_success({"name": name, "restarted": True})
 
 
-def sessions_command():
+def sessions_command(
+    output_format: Annotated[
+        str,
+        typer.Option("--format", help="Output format: text or json"),
+    ] = "text",
+):
     """List all active sessions"""
     from colab_cli.common import state
 
-    sessions, assignments = state.sync_sessions()
+    json_output = wants_json(output_format)
+    sessions, assignments = state.sync_sessions(emit_diagnostics=not json_output)
     if not assignments:
+        if json_output:
+            emit_json_success({"sessions": []})
+            return
         typer.echo("[colab] No active sessions found on server.")
         return
 
     # Build endpoint -> local-name lookup so we can lead with the friendly name.
     name_by_endpoint = {s.endpoint: s.name for s in sessions.values()}
+    results = []
     for a in assignments:
         name = name_by_endpoint.get(a.endpoint, "?")
         # `a.variant` is an int-valued AssignmentVariant (DEFAULT=0/GPU=1/TPU=2);
         # its `.name` matches the user-facing string Variant enum, which is what
         # `status` shows for locally-tracked sessions.
-        typer.echo(
-            _format_session_line(
-                name=name,
-                endpoint=a.endpoint,
-                accelerator=a.accelerator.value,
-                variant=a.variant.name,
+        if json_output:
+            results.append(
+                {
+                    "name": name,
+                    "endpoint": a.endpoint,
+                    "hardware": _hardware_label(a.accelerator.value),
+                    "variant": a.variant.name,
+                }
             )
-        )
+        else:
+            typer.echo(
+                _format_session_line(
+                    name=name,
+                    endpoint=a.endpoint,
+                    accelerator=a.accelerator.value,
+                    variant=a.variant.name,
+                )
+            )
+    if json_output:
+        emit_json_success({"sessions": results})
 
 
 def _print_status_for(s: SessionState) -> None:
@@ -331,21 +425,55 @@ def status(
     session: Annotated[
         Optional[str], typer.Option("-s", "--session", help="Session name")
     ] = None,
+    output_format: Annotated[
+        str,
+        typer.Option("--format", help="Output format: text or json"),
+    ] = "text",
 ):
     """Show session status"""
     from colab_cli.common import state
 
-    local_sessions, _ = state.sync_sessions()
+    json_output = wants_json(output_format)
     if session:
         s = state.store.get(session)
         if s:
-            _print_status_for(s)
+            if json_output:
+                status_value = "busy" if s.running else "idle"
+                emit_json_success(session_result(s, status=status_value))
+            else:
+                _print_status_for(s)
         else:
-            typer.echo(f"[colab] Session '{session}' not found.")
+            if json_output:
+                emit_json_error(
+                    "SESSION_NOT_FOUND",
+                    f"Session '{session}' not found",
+                    exit_code=ExitCode.NOT_FOUND,
+                    retryable=False,
+                    suggested_action="list_sessions",
+                )
+            else:
+                typer.echo(f"[colab] Session '{session}' not found.")
         return
 
+    local_sessions, _ = state.sync_sessions(emit_diagnostics=not json_output)
     if not local_sessions:
+        if json_output:
+            emit_json_success({"sessions": []})
+            return
         typer.echo("[colab] No active sessions.")
+        return
+    if json_output:
+        emit_json_success(
+            {
+                "sessions": [
+                    session_result(
+                        item,
+                        status="busy" if item.running else "idle",
+                    )
+                    for item in local_sessions.values()
+                ]
+            }
+        )
         return
     for s in local_sessions.values():
         _print_status_for(s)
@@ -355,17 +483,36 @@ def stop(
     session: Annotated[
         Optional[str], typer.Option("-s", "--session", help="Session name")
     ] = None,
+    output_format: Annotated[
+        str,
+        typer.Option("--format", help="Output format: text or json"),
+    ] = "text",
 ):
     """Stop a session"""
     from colab_cli.common import state
 
-    name = state.resolve_session(session)
+    json_output = wants_json(output_format)
+    name = (
+        resolve_json_session(state, session)
+        if json_output
+        else state.resolve_session(session)
+    )
     s = state.store.get(name)
     if not s:
-        typer.echo(f"[colab] Session '{name}' not found.")
+        if json_output:
+            emit_json_error(
+                "SESSION_NOT_FOUND",
+                f"Session '{name}' not found",
+                exit_code=ExitCode.NOT_FOUND,
+                retryable=False,
+                suggested_action="list_sessions",
+            )
+        else:
+            typer.echo(f"[colab] Session '{name}' not found.")
         return
 
-    typer.echo(f"[colab] Stopping session '{name}'...")
+    if not json_output:
+        typer.echo(f"[colab] Stopping session '{name}'...")
     if s.keep_alive_pid:
         from colab_cli.common import kill_process
 
@@ -380,7 +527,10 @@ def stop(
     state.client.unassign(s.endpoint)
     state.store.remove(name)
     state.history.log_event(name, "session_terminated", {"reason": "user_requested"})
-    typer.echo("[colab] Session terminated.")
+    if json_output:
+        emit_json_success({"name": name, "stopped": True})
+    else:
+        typer.echo("[colab] Session terminated.")
 
 
 def spawn_keep_alive(

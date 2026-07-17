@@ -1,5 +1,6 @@
 """The ``better-colab`` command-line entry point."""
 
+from better_colab import commands
 from colab_cli.cli import create_app
 
 
@@ -8,6 +9,7 @@ app = create_app(
     include_drive=False,
     include_legacy_skill=False,
 )
+commands.register(app)
 
 
 def main() -> None:

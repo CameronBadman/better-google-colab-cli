@@ -78,7 +78,7 @@ class State:
             del self._sessions[name]
         self.history.log_event(name, "session_terminated", {"reason": "pruned"})
 
-    def sync_sessions(self):
+    def sync_sessions(self, *, emit_diagnostics: bool = True):
         if self._sessions is not None:
             return self._sessions, self.client.list_assignments()
 
@@ -106,7 +106,7 @@ class State:
                 self.prune_session(name)
                 pruned += 1
 
-        if pruned > 0:
+        if pruned > 0 and emit_diagnostics:
             typer.echo(f"[colab] Pruned {pruned} stale local session(s).")
 
         return self._sessions, assignments

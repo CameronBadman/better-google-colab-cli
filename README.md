@@ -73,6 +73,18 @@ better-colab update
 
 Normal commands never perform an update request or print an update banner.
 
+Discover the compact machine contract or inspect passive local health:
+
+```bash
+better-colab capabilities --format json
+better-colab capabilities execution.start --format json
+better-colab doctor --format json
+```
+
+During the controller migration, retained non-interactive session, file, and
+install commands also accept `--format json`. Every JSON response uses schema
+version 1 and is hard-capped at 262,144 bytes.
+
 ## Documentation
 
 - [Agent-first architecture and public contracts](DESIGN.md)
@@ -82,6 +94,7 @@ Normal commands never perform an update request or print an update banner.
 - [Upstream file-management design](docs/03_file_management.md)
 - [Authentication and non-Drive automation](docs/04_automation_and_utility.md)
 - [Upstream ephemeral runner design](docs/05_run_command.md)
+- [JSON v1 and typed Python API](docs/06_json_and_typed_api.md)
 
 ## Contributing
 

@@ -20,6 +20,13 @@ import typer
 from typing import Optional
 from typing_extensions import Annotated
 
+from better_colab.errors import ExitCode
+from better_colab.legacy import (
+    emit_error as emit_json_error,
+    emit_success as emit_json_success,
+    resolve_session as resolve_json_session,
+    wants_json,
+)
 from colab_cli.contents import ContentsClient
 
 
@@ -28,13 +35,30 @@ def ls(
         Optional[str], typer.Option("-s", "--session", help="Session name")
     ] = None,
     path: Annotated[str, typer.Argument(help="Remote path to list")] = "content",
+    output_format: Annotated[
+        str,
+        typer.Option("--format", help="Output format: text or json"),
+    ] = "text",
 ):
     """List files in a session"""
     from colab_cli.common import state
 
-    name = state.resolve_session(session)
+    json_output = wants_json(output_format)
+    name = (
+        resolve_json_session(state, session)
+        if json_output
+        else state.resolve_session(session)
+    )
     s = state.store.get(name)
     if not s:
+        if json_output:
+            emit_json_error(
+                "SESSION_NOT_FOUND",
+                f"Session '{name}' not found",
+                exit_code=ExitCode.NOT_FOUND,
+                retryable=False,
+                suggested_action="list_sessions",
+            )
         typer.echo(f"[colab] Session '{name}' not found.")
         raise typer.Exit(1)
     contents = ContentsClient(s)
@@ -43,14 +67,53 @@ def ls(
         state.history.log_event(name, "file_operation", {"op": "ls", "path": path})
         if data.get("type") == "directory":
             items = data.get("content", [])
-            for item in sorted(
+            sorted_items = sorted(
                 items, key=lambda x: (x.get("type") != "directory", x.get("name"))
-            ):
-                suffix = "/" if item.get("type") == "directory" else ""
-                typer.echo(f"{item.get('name')}{suffix}")
+            )
+            if json_output:
+                emit_json_success(
+                    {
+                        "session": name,
+                        "path": path,
+                        "type": "directory",
+                        "items": [
+                            {
+                                key: item[key]
+                                for key in ("name", "type", "size")
+                                if item.get(key) is not None
+                            }
+                            for item in sorted_items
+                        ],
+                    }
+                )
+            else:
+                for item in sorted_items:
+                    suffix = "/" if item.get("type") == "directory" else ""
+                    typer.echo(f"{item.get('name')}{suffix}")
         else:
-            typer.echo(data.get("name"))
+            if json_output:
+                emit_json_success(
+                    {
+                        "session": name,
+                        "path": path,
+                        "type": data.get("type", "file"),
+                        "name": data.get("name"),
+                        "size": data.get("size"),
+                    }
+                )
+            else:
+                typer.echo(data.get("name"))
     except Exception as e:
+        if isinstance(e, typer.Exit):
+            raise
+        if json_output:
+            emit_json_error(
+                "FILE_OPERATION_FAILED",
+                str(e),
+                exit_code=ExitCode.UNAVAILABLE,
+                retryable=True,
+                suggested_action="retry_file_operation",
+            )
         typer.echo(f"[colab] Error: {e}")
         raise typer.Exit(1)
 
@@ -60,21 +123,51 @@ def rm(
         Optional[str], typer.Option("-s", "--session", help="Session name")
     ] = None,
     path: Annotated[str, typer.Argument(help="Remote path to remove")] = ...,
+    output_format: Annotated[
+        str,
+        typer.Option("--format", help="Output format: text or json"),
+    ] = "text",
 ):
     """Remove a remote file"""
     from colab_cli.common import state
 
-    name = state.resolve_session(session)
+    json_output = wants_json(output_format)
+    name = (
+        resolve_json_session(state, session)
+        if json_output
+        else state.resolve_session(session)
+    )
     s = state.store.get(name)
     if not s:
+        if json_output:
+            emit_json_error(
+                "SESSION_NOT_FOUND",
+                f"Session '{name}' not found",
+                exit_code=ExitCode.NOT_FOUND,
+                retryable=False,
+                suggested_action="list_sessions",
+            )
         typer.echo(f"[colab] Session '{name}' not found.")
         raise typer.Exit(1)
     contents = ContentsClient(s)
     try:
         contents.rm(path)
         state.history.log_event(name, "file_operation", {"op": "rm", "path": path})
-        typer.echo(f"[colab] Deleted {path}")
+        if json_output:
+            emit_json_success({"session": name, "path": path, "deleted": True})
+        else:
+            typer.echo(f"[colab] Deleted {path}")
     except Exception as e:
+        if isinstance(e, typer.Exit):
+            raise
+        if json_output:
+            emit_json_error(
+                "FILE_OPERATION_FAILED",
+                str(e),
+                exit_code=ExitCode.UNAVAILABLE,
+                retryable=True,
+                suggested_action="retry_file_operation",
+            )
         typer.echo(f"[colab] Error: {e}")
         raise typer.Exit(1)
 
@@ -85,16 +178,41 @@ def upload(
     ] = None,
     local_path: Annotated[str, typer.Argument(help="Local file to upload")] = ...,
     remote_path: Annotated[str, typer.Argument(help="Remote path to upload to")] = ...,
+    output_format: Annotated[
+        str,
+        typer.Option("--format", help="Output format: text or json"),
+    ] = "text",
 ):
     """Upload a file to a session"""
     from colab_cli.common import state
 
-    name = state.resolve_session(session)
+    json_output = wants_json(output_format)
+    name = (
+        resolve_json_session(state, session)
+        if json_output
+        else state.resolve_session(session)
+    )
     s = state.store.get(name)
     if not s:
+        if json_output:
+            emit_json_error(
+                "SESSION_NOT_FOUND",
+                f"Session '{name}' not found",
+                exit_code=ExitCode.NOT_FOUND,
+                retryable=False,
+                suggested_action="list_sessions",
+            )
         typer.echo(f"[colab] Session '{name}' not found.")
         raise typer.Exit(1)
     if not os.path.isfile(local_path):
+        if json_output:
+            emit_json_error(
+                "LOCAL_FILE_NOT_FOUND",
+                f"Local file '{local_path}' not found",
+                exit_code=ExitCode.NOT_FOUND,
+                retryable=False,
+                suggested_action="check_local_path",
+            )
         typer.echo(f"[colab] Local file '{local_path}' not found.")
         raise typer.Exit(1)
     contents = ContentsClient(s)
@@ -105,8 +223,28 @@ def upload(
             "file_operation",
             {"op": "upload", "local": local_path, "remote": remote_path},
         )
-        typer.echo(f"[colab] Uploaded '{local_path}' to '{remote_path}'")
+        if json_output:
+            emit_json_success(
+                {
+                    "session": name,
+                    "local_path": local_path,
+                    "remote_path": remote_path,
+                    "uploaded": True,
+                }
+            )
+        else:
+            typer.echo(f"[colab] Uploaded '{local_path}' to '{remote_path}'")
     except Exception as e:
+        if isinstance(e, typer.Exit):
+            raise
+        if json_output:
+            emit_json_error(
+                "UPLOAD_FAILED",
+                str(e),
+                exit_code=ExitCode.UNAVAILABLE,
+                retryable=True,
+                suggested_action="retry_upload",
+            )
         typer.echo(f"[colab] Upload failed: {e}")
         raise typer.Exit(1)
 
@@ -121,13 +259,30 @@ def download(
     local_path: Annotated[
         str, typer.Argument(help="Local path to save the file")
     ] = ...,
+    output_format: Annotated[
+        str,
+        typer.Option("--format", help="Output format: text or json"),
+    ] = "text",
 ):
     """Download a file from a session"""
     from colab_cli.common import state
 
-    name = state.resolve_session(session)
+    json_output = wants_json(output_format)
+    name = (
+        resolve_json_session(state, session)
+        if json_output
+        else state.resolve_session(session)
+    )
     s = state.store.get(name)
     if not s:
+        if json_output:
+            emit_json_error(
+                "SESSION_NOT_FOUND",
+                f"Session '{name}' not found",
+                exit_code=ExitCode.NOT_FOUND,
+                retryable=False,
+                suggested_action="list_sessions",
+            )
         typer.echo(f"[colab] Session '{name}' not found.")
         raise typer.Exit(1)
     contents = ContentsClient(s)
@@ -138,8 +293,28 @@ def download(
             "file_operation",
             {"op": "download", "remote": remote_path, "local": local_path},
         )
-        typer.echo(f"[colab] Downloaded '{remote_path}' to '{local_path}'")
+        if json_output:
+            emit_json_success(
+                {
+                    "session": name,
+                    "remote_path": remote_path,
+                    "local_path": local_path,
+                    "downloaded": True,
+                }
+            )
+        else:
+            typer.echo(f"[colab] Downloaded '{remote_path}' to '{local_path}'")
     except Exception as e:
+        if isinstance(e, typer.Exit):
+            raise
+        if json_output:
+            emit_json_error(
+                "DOWNLOAD_FAILED",
+                str(e),
+                exit_code=ExitCode.UNAVAILABLE,
+                retryable=True,
+                suggested_action="retry_download",
+            )
         typer.echo(f"[colab] Download failed: {e}")
         raise typer.Exit(1)
 

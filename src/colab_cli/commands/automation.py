@@ -21,6 +21,13 @@ import typer
 from rich.console import Console
 from typing_extensions import Annotated
 
+from better_colab.errors import ExitCode
+from better_colab.legacy import (
+    emit_error as emit_json_error,
+    emit_success as emit_json_success,
+    resolve_session as resolve_json_session,
+    wants_json,
+)
 from colab_cli.runtime import ColabRuntime
 from colab_cli.contents import ContentsClient
 from colab_cli.auth import get_credentials
@@ -46,6 +53,7 @@ def run_automation(
     allow_stdin: bool = False,
     path: str = None,
     timeout: Optional[float] = None,
+    emit_output: bool = True,
 ):
     from colab_cli.common import state
 
@@ -132,6 +140,7 @@ def run_automation(
         return False
 
     runtime.colab_request_hook = drivefs_hook
+    outputs = []
     try:
         s.running = f"automation({op})"
         s.last_execution = (
@@ -153,25 +162,27 @@ def run_automation(
             name, "automation_result", {"op": op, "outputs": outputs}
         )
 
-        for out in outputs:
-            if "text" in out:
-                sys.stdout.write(out["text"])
-            elif "data" in out:
-                text = render_display_data(out["data"])
-                if text is not None:
-                    _console.print(text)
-            elif out.get("output_type") == "error":
-                ename = out.get("ename", "Error")
-                evalue = out.get("evalue", "")
-                tb = out.get("traceback", [])
-                if tb:
-                    sys.stderr.write("".join(tb) + "\n")
-                else:
-                    sys.stderr.write(f"{ename}: {evalue}\n")
+        if emit_output:
+            for out in outputs:
+                if "text" in out:
+                    sys.stdout.write(out["text"])
+                elif "data" in out:
+                    text = render_display_data(out["data"])
+                    if text is not None:
+                        _console.print(text)
+                elif out.get("output_type") == "error":
+                    ename = out.get("ename", "Error")
+                    evalue = out.get("evalue", "")
+                    tb = out.get("traceback", [])
+                    if tb:
+                        sys.stderr.write("".join(tb) + "\n")
+                    else:
+                        sys.stderr.write(f"{ename}: {evalue}\n")
     finally:
         s.running = None
         state.store.add(s)
         runtime.stop()
+    return outputs
 
 
 def auth(
@@ -226,18 +237,43 @@ def install(
     requirement: Annotated[
         Optional[str], typer.Option("-r", "--requirement", help="Requirements file")
     ] = None,
+    output_format: Annotated[
+        str,
+        typer.Option("--format", help="Output format: text or json"),
+    ] = "text",
 ):
     """Install python packages on the VM"""
     from colab_cli.common import state
 
-    name = state.resolve_session(session)
+    json_output = wants_json(output_format)
+    name = (
+        resolve_json_session(state, session)
+        if json_output
+        else state.resolve_session(session)
+    )
     if not packages and not requirement:
+        if json_output:
+            emit_json_error(
+                "INSTALL_INPUT_REQUIRED",
+                "Specify packages or --requirement",
+                exit_code=ExitCode.USAGE,
+                retryable=False,
+                suggested_action="specify_packages",
+            )
         typer.echo("[colab] No packages or requirements specified.")
         raise typer.Exit(1)
 
     commands = []
     if requirement:
         if not os.path.isfile(requirement):
+            if json_output:
+                emit_json_error(
+                    "LOCAL_FILE_NOT_FOUND",
+                    f"Requirements file '{requirement}' not found",
+                    exit_code=ExitCode.NOT_FOUND,
+                    retryable=False,
+                    suggested_action="check_local_path",
+                )
             typer.echo(f"[colab] Requirements file '{requirement}' not found locally.")
             raise typer.Exit(1)
         contents = ContentsClient(state.store.get(name))
@@ -260,8 +296,29 @@ def install():
         print('Installation Complete (via pip)!')
 install()
 """
-    typer.echo(f"[colab] Installing packages on {name} (preferring uv)...")
-    run_automation(name, "install", code)
+    if not json_output:
+        typer.echo(f"[colab] Installing packages on {name} (preferring uv)...")
+    try:
+        run_automation(name, "install", code, emit_output=not json_output)
+    except Exception as error:
+        if json_output:
+            emit_json_error(
+                "INSTALL_FAILED",
+                str(error),
+                exit_code=ExitCode.UNAVAILABLE,
+                retryable=True,
+                suggested_action="inspect_execution_and_retry",
+            )
+        raise
+    if json_output:
+        emit_json_success(
+            {
+                "session": name,
+                "packages": list(packages or []),
+                "requirement": requirement,
+                "installed": True,
+            }
+        )
 
 
 def register(app: typer.Typer, *, include_drive: bool = True):

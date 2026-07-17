@@ -92,12 +92,12 @@ def create_app(
         ] = AuthProvider.OAUTH2,
     ):
         """Configure authentication and local state for this invocation."""
-        del ctx  # Reserved for surface-specific callback behavior.
         state.client_oauth_config = client_oauth_config
         state.config_path = config
         state.logtostderr = logtostderr
         state.auth_provider = auth
-        setup_logging(logtostderr)
+        if ctx.invoked_subcommand not in {"capabilities", "doctor"}:
+            setup_logging(logtostderr)
 
         # Update checks are intentionally explicit. Agent-facing stdout must
         # never be changed by a background network request or cached banner.
