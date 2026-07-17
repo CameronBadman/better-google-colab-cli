@@ -72,7 +72,6 @@ class ControllerServer:
         self._writers: set[asyncio.StreamWriter] = set()
         self._topics: dict[str, _Topic] = {}
         self._lifetime_lock = filelock.FileLock(str(paths.lifetime_lock))
-        self._metadata_store: DurableStore | None = None
         self._transport_factory = transport_factory
         self._coordinator: ExecutionCoordinator | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -98,10 +97,11 @@ class ControllerServer:
                 "controller socket already exists; startup election must "
                 "remove stale sockets"
             )
-        self._metadata_store = DurableStore(
+        with DurableStore(
             paths=self.paths,
             profile=self._default_profile(),
-        )
+        ):
+            pass
         coordinator_kwargs: dict[str, Any] = {
             "paths": self.paths,
             "notify": self._notify_from_worker,
@@ -152,9 +152,6 @@ class ControllerServer:
         if self._coordinator is not None:
             self._coordinator.close()
             self._coordinator = None
-        if self._metadata_store is not None:
-            self._metadata_store.close()
-            self._metadata_store = None
         self.paths.socket.unlink(missing_ok=True)
         self.paths.pid_file.unlink(missing_ok=True)
         if self._lifetime_lock.is_locked:
@@ -1171,31 +1168,10 @@ class ControllerServer:
         return {"revision": topic.revision}
 
     def _profile_specs(self) -> list[ProfileSpec]:
-        assert self._metadata_store is not None
-        rows = self._metadata_store.connection.execute(
-            """
-            SELECT config_path, auth_provider, oauth_config_path
-            FROM profiles ORDER BY profile_id
-            """
-        )
-        return [
-            ProfileSpec.from_values(
-                config_path=row["config_path"],
-                auth_provider=row["auth_provider"],
-                oauth_config_path=row["oauth_config_path"],
-            )
-            for row in rows
-        ]
+        return DurableStore.list_profiles(self.paths)
 
     def _active_execution_count(self) -> int:
-        assert self._metadata_store is not None
-        return self._metadata_store.connection.execute(
-            """
-            SELECT COUNT(*) FROM executions
-            WHERE state IN ('created', 'queued', 'dispatching', 'running',
-                            'disconnected')
-            """
-        ).fetchone()[0]
+        return DurableStore.active_execution_count(self.paths)
 
     def _force_active_uncertain(self, *, reason: str) -> list[str]:
         affected: list[str] = []

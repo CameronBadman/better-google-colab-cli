@@ -9,6 +9,7 @@ import filelock
 import pytest
 
 from better_colab import BetterColabError, ExecutionState
+from better_colab.controller import ControllerServer
 from better_colab.controller_client import ControllerClient
 from better_colab.controller_protocol import encode_frame, recv_frame
 from better_colab.storage import DurableStore, ProfileSpec, StatePaths
@@ -217,6 +218,43 @@ def test_profiles_are_isolated_behind_one_controller(
         }
     ]
     assert "secret" not in repr(oauth_sessions + adc_sessions)
+
+
+def test_controller_status_survives_external_wal_writers(
+    controller_client, controller_paths, tmp_path
+):
+    """Foreground typed operations must not stale the controller's DB view."""
+    controller_client.ensure_running()
+    profile = _profile(tmp_path, "oauth2")
+
+    for index in range(100):
+        with DurableStore(paths=controller_paths, profile=profile) as store:
+            store.upsert_session(
+                name="shared",
+                endpoint=f"endpoint-{index}",
+                backend_url="https://runtime.example",
+                runtime_token="secret",
+                hardware="CPU",
+            )
+        status = controller_client.status()
+        assert status["controller_alive"] is True
+
+
+def test_controller_scopes_metadata_connections_to_each_operation(
+    controller_paths,
+):
+    async def scenario():
+        server = ControllerServer(paths=controller_paths)
+        await server.start()
+        try:
+            assert getattr(server, "_metadata_store", None) is None
+            assert server._status()["controller_alive"] is True
+        finally:
+            await server.close()
+
+    import asyncio
+
+    asyncio.run(scenario())
 
 
 def test_normal_stop_refuses_active_work_and_force_journals_unknown(

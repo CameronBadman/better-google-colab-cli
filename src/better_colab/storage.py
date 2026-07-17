@@ -552,6 +552,54 @@ class DurableStore:
         self.connection.execute("PRAGMA synchronous=FULL")
         self.paths.database.chmod(0o600)
 
+    @staticmethod
+    @contextlib.contextmanager
+    def _metadata_connection(
+        paths: StatePaths,
+    ) -> Iterator[sqlite3.Connection]:
+        """Open a short-lived read snapshot for controller-wide metadata."""
+        connection = sqlite3.connect(
+            paths.database,
+            timeout=5,
+            isolation_level=None,
+        )
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA busy_timeout=5000")
+            connection.execute("PRAGMA query_only=ON")
+            yield connection
+        finally:
+            connection.close()
+
+    @classmethod
+    def list_profiles(cls, paths: StatePaths) -> list[ProfileSpec]:
+        with cls._metadata_connection(paths) as connection:
+            rows = connection.execute(
+                """
+                SELECT config_path, auth_provider, oauth_config_path
+                FROM profiles ORDER BY profile_id
+                """
+            ).fetchall()
+        return [
+            ProfileSpec.from_values(
+                config_path=row["config_path"],
+                auth_provider=row["auth_provider"],
+                oauth_config_path=row["oauth_config_path"],
+            )
+            for row in rows
+        ]
+
+    @classmethod
+    def active_execution_count(cls, paths: StatePaths) -> int:
+        with cls._metadata_connection(paths) as connection:
+            return connection.execute(
+                """
+                SELECT COUNT(*) FROM executions
+                WHERE state IN ('created', 'queued', 'dispatching', 'running',
+                                'disconnected')
+                """
+            ).fetchone()[0]
+
     def _migrate(self) -> None:
         current = self.connection.execute("PRAGMA user_version").fetchone()[0]
         if current > DATABASE_SCHEMA_VERSION:
