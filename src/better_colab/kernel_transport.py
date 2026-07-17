@@ -171,6 +171,64 @@ class ExecutionProof:
         return "error"
 
 
+class ReadinessProof:
+    """Validate one no-history nonce execution through raw kernel messages."""
+
+    def __init__(self, message_id: str, nonce: str):
+        self.message_id = message_id
+        self.nonce = nonce
+        self.reply_valid = False
+        self.idle_received = False
+        self.error: str | None = None
+
+    @property
+    def ready(self) -> bool:
+        return (
+            self.reply_valid
+            and self.idle_received
+            and self.error is None
+        )
+
+    def observe(self, event: KernelEvent) -> bool:
+        parent = event.message.get("parent_header")
+        if not isinstance(parent, dict) or parent.get("msg_id") != self.message_id:
+            return False
+        message_type = ExecutionProof._message_type(event.message)
+        content = event.message.get("content")
+        if (
+            event.channel == "iopub"
+            and message_type == "status"
+            and isinstance(content, dict)
+            and content.get("execution_state") == "idle"
+        ):
+            self.idle_received = True
+            return True
+        if event.channel != "shell" or message_type != "execute_reply":
+            return True
+        if not isinstance(content, dict):
+            self.error = "MALFORMED_REPLY"
+            return True
+        if content.get("status") != "ok":
+            self.error = "PROBE_EXECUTION_ERROR"
+            return True
+        expressions = content.get("user_expressions")
+        expression = (
+            expressions.get("better_colab_nonce")
+            if isinstance(expressions, dict)
+            else None
+        )
+        if not isinstance(expression, dict) or expression.get("status") != "ok":
+            self.error = "NONCE_MISSING"
+            return True
+        data = expression.get("data")
+        rendered = data.get("text/plain") if isinstance(data, dict) else None
+        if rendered != repr(self.nonce):
+            self.error = "NONCE_MISMATCH"
+            return True
+        self.reply_valid = True
+        return True
+
+
 class KernelTransportAdapter:
     """Single-reader adapter around the pinned blocking websocket client."""
 
@@ -241,6 +299,23 @@ class KernelTransportAdapter:
             "silent": silent,
             "store_history": False if silent else store_history,
             "user_expressions": {},
+            "allow_stdin": False,
+            "stop_on_error": True,
+        }
+        message = self._client.session.msg("execute_request", content)
+        return PreparedExecution(
+            message_id=str(message["header"]["msg_id"]),
+            message=message,
+        )
+
+    def prepare_readiness_probe(self, nonce: str) -> PreparedExecution:
+        if not isinstance(nonce, str) or not nonce:
+            raise ValueError("readiness nonce must be non-empty text")
+        content = {
+            "code": "None",
+            "silent": False,
+            "store_history": False,
+            "user_expressions": {"better_colab_nonce": repr(nonce)},
             "allow_stdin": False,
             "stop_on_error": True,
         }

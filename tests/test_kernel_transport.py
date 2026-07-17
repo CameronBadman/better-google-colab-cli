@@ -118,6 +118,29 @@ def test_adapter_prepares_then_sends_the_exact_same_request():
     assert private.shell_channel.sent[0] is prepared.message
 
 
+def test_adapter_prepares_no_history_nonce_request():
+    private = _PrivateClient()
+    adapter = KernelTransportAdapter.from_connected_client(
+        _KernelClient(private),
+        kernel_id="kernel-1",
+        jupyter_session_id="jupyter-1",
+    )
+
+    readiness = adapter.prepare_readiness_probe("nonce-123")
+
+    assert readiness.message["msg_type"] == "execute_request"
+    assert readiness.message["content"] == {
+        "code": "None",
+        "silent": False,
+        "store_history": False,
+        "user_expressions": {
+            "better_colab_nonce": repr("nonce-123"),
+        },
+        "allow_stdin": False,
+        "stop_on_error": True,
+    }
+
+
 def test_adapter_is_the_single_reader_for_shell_and_iopub():
     private = _PrivateClient()
     adapter = KernelTransportAdapter.from_connected_client(

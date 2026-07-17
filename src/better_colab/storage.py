@@ -325,6 +325,20 @@ class BatchRecord(PublicModel):
     completed_at: str | None = None
 
 
+class KernelConnectionRecord(PublicModel):
+    profile_id: str
+    session_name: str
+    kernel_id: str
+    jupyter_session_id: str
+    connection_id: str
+    connected_at: str
+    disconnected_at: str | None = None
+    readiness_nonce: str | None = None
+    readiness_checked_at: str | None = None
+    readiness_latency_ms: float | None = None
+    readiness_error: str | None = None
+
+
 SCHEMA_V1 = """
 CREATE TABLE profiles (
     profile_id TEXT PRIMARY KEY,
@@ -818,6 +832,155 @@ class DurableStore:
                     suggested_action="ensure_session",
                 )
         return self.get_session(name)
+
+    def record_kernel_connection(
+        self,
+        session_name: str,
+        *,
+        kernel_id: str,
+        jupyter_session_id: str,
+        connection_id: str,
+    ) -> KernelConnectionRecord:
+        now = self._time()
+        with self.transaction() as connection:
+            if self.get_session(session_name) is None:
+                raise api_error(
+                    "SESSION_NOT_FOUND",
+                    f"Session not found: {session_name}",
+                    exit_code=ExitCode.NOT_FOUND,
+                    retryable=False,
+                    suggested_action="ensure_session",
+                )
+            connection.execute(
+                """
+                INSERT INTO kernel_connections (
+                    profile_id, session_name, kernel_id, jupyter_session_id,
+                    connection_id, connected_at, disconnected_at,
+                    readiness_nonce, readiness_checked_at,
+                    readiness_latency_ms, readiness_error
+                ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL)
+                ON CONFLICT(profile_id, session_name) DO UPDATE SET
+                    kernel_id = excluded.kernel_id,
+                    jupyter_session_id = excluded.jupyter_session_id,
+                    connection_id = excluded.connection_id,
+                    connected_at = excluded.connected_at,
+                    disconnected_at = NULL,
+                    readiness_nonce = NULL,
+                    readiness_checked_at = NULL,
+                    readiness_latency_ms = NULL,
+                    readiness_error = NULL
+                """,
+                (
+                    self.profile.profile_id,
+                    session_name,
+                    kernel_id,
+                    jupyter_session_id,
+                    connection_id,
+                    now,
+                ),
+            )
+        return self.get_kernel_connection(session_name)
+
+    def get_kernel_connection(
+        self,
+        session_name: str,
+    ) -> KernelConnectionRecord | None:
+        row = self.connection.execute(
+            """
+            SELECT profile_id, session_name, kernel_id, jupyter_session_id,
+                   connection_id, connected_at, disconnected_at,
+                   readiness_nonce, readiness_checked_at,
+                   readiness_latency_ms, readiness_error
+            FROM kernel_connections
+            WHERE profile_id = ? AND session_name = ?
+            """,
+            (self.profile.profile_id, session_name),
+        ).fetchone()
+        return (
+            KernelConnectionRecord.model_validate(dict(row))
+            if row is not None
+            else None
+        )
+
+    def record_kernel_readiness(
+        self,
+        session_name: str,
+        *,
+        connection_id: str,
+        nonce: str,
+        latency_ms: float,
+        error: str | None,
+    ) -> KernelConnectionRecord:
+        checked_at = self._time()
+        with self.transaction() as connection:
+            result = connection.execute(
+                """
+                UPDATE kernel_connections
+                SET readiness_nonce = ?, readiness_checked_at = ?,
+                    readiness_latency_ms = ?, readiness_error = ?
+                WHERE profile_id = ? AND session_name = ?
+                  AND connection_id = ? AND disconnected_at IS NULL
+                """,
+                (
+                    nonce,
+                    checked_at,
+                    latency_ms,
+                    error,
+                    self.profile.profile_id,
+                    session_name,
+                    connection_id,
+                ),
+            )
+            if result.rowcount != 1:
+                raise api_error(
+                    "KERNEL_CONNECTION_CHANGED",
+                    "Kernel connection changed during readiness probe",
+                    exit_code=ExitCode.UNAVAILABLE,
+                    retryable=True,
+                    suggested_action="retry_session_probe",
+                )
+        return self.get_kernel_connection(session_name)
+
+    def disconnect_kernel_connection(
+        self,
+        session_name: str,
+        *,
+        connection_id: str | None = None,
+    ) -> None:
+        connection_clause = ""
+        parameters: list[Any] = [
+            self._time(),
+            self.profile.profile_id,
+            session_name,
+        ]
+        if connection_id is not None:
+            connection_clause = " AND connection_id = ?"
+            parameters.append(connection_id)
+        with self.transaction() as connection:
+            connection.execute(
+                f"""
+                UPDATE kernel_connections
+                SET disconnected_at = ?, readiness_nonce = NULL,
+                    readiness_checked_at = NULL,
+                    readiness_latency_ms = NULL, readiness_error = NULL
+                WHERE profile_id = ? AND session_name = ?
+                  {connection_clause}
+                """,
+                parameters,
+            )
+
+    def invalidate_kernel_connections(self) -> None:
+        with self.transaction() as connection:
+            connection.execute(
+                """
+                UPDATE kernel_connections
+                SET disconnected_at = ?, readiness_nonce = NULL,
+                    readiness_checked_at = NULL,
+                    readiness_latency_ms = NULL, readiness_error = NULL
+                WHERE profile_id = ?
+                """,
+                (self._time(), self.profile.profile_id),
+            )
 
     def delete_session(self, name: str) -> None:
         with self.transaction() as connection:

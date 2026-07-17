@@ -128,6 +128,13 @@ class SessionSummary(PublicModel):
     status: str | None = None
 
 
+class SessionHealthResult(HealthResult):
+    name: str
+    endpoint: str
+    hardware: str
+    variant: str
+
+
 class SourceProvenance(PublicModel):
     kind: str
     sha256: str
