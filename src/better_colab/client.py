@@ -23,6 +23,7 @@ from better_colab.models import (
     ExecutionWaitResult,
     OutputPage,
     PruneResult,
+    SessionHealthResult,
 )
 from better_colab.protocol import (
     DEFAULT_EXECUTION_LIMIT,
@@ -142,6 +143,26 @@ class BetterColabClient:
             **result,
             controller_alive=False,
         )
+
+    def session_status(self, name: str) -> SessionHealthResult:
+        result = ControllerClient(paths=self.paths).session_status(
+            profile=self.profile,
+            name=name,
+        )
+        return SessionHealthResult.model_validate(result)
+
+    def session_probe(
+        self,
+        name: str,
+        *,
+        timeout: float = 10,
+    ) -> SessionHealthResult:
+        result = ControllerClient(paths=self.paths).session_probe(
+            profile=self.profile,
+            name=name,
+            timeout=timeout,
+        )
+        return SessionHealthResult.model_validate(result)
 
     def start_execution(
         self,

@@ -24,6 +24,7 @@ from better_colab.models import (
     OutputEvent,
     OutputPage,
     PruneResult,
+    SessionHealthResult,
     SessionSummary,
     SourceProvenance,
 )
@@ -53,6 +54,7 @@ __all__ = [
     "OutputEvent",
     "OutputPage",
     "PruneResult",
+    "SessionHealthResult",
     "SessionSummary",
     "SourceProvenance",
 ]

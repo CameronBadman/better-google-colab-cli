@@ -257,6 +257,33 @@ class ControllerClient:
         result = self.request("profile.sessions", self._profile_params(profile))
         return result["sessions"]
 
+    def session_status(
+        self,
+        *,
+        profile: ProfileSpec,
+        name: str,
+    ) -> dict[str, Any]:
+        self.ensure_running()
+        params = self._profile_params(profile)
+        params["name"] = name
+        return self.request("session.status", params)
+
+    def session_probe(
+        self,
+        *,
+        profile: ProfileSpec,
+        name: str,
+        timeout: float,
+    ) -> dict[str, Any]:
+        self.ensure_running()
+        params = self._profile_params(profile)
+        params.update({"name": name, "timeout": timeout})
+        return self.request(
+            "session.probe",
+            params,
+            timeout=max(self.connect_timeout, timeout + 1),
+        )
+
     def start_execution(
         self,
         *,

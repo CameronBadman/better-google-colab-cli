@@ -6,6 +6,7 @@ from better_colab.models import (
     ExecutionListResult,
     ExecutionResult,
     ExecutionWaitResult,
+    SessionHealthResult,
 )
 from better_colab.storage import ProfileSpec, StatePaths
 
@@ -169,3 +170,35 @@ def test_controller_profile_parameters_never_include_runtime_secrets(
     profile = controller.execution_status.call_args.kwargs["profile"]
     assert isinstance(profile, ProfileSpec)
     assert "token" not in repr(profile)
+
+
+def test_session_status_and_probe_are_typed(mocker, client):
+    controller = mocker.patch(
+        "better_colab.client.ControllerClient",
+    ).return_value
+    health = {
+        "name": "training",
+        "endpoint": "endpoint",
+        "hardware": "CPU",
+        "variant": "DEFAULT",
+        "controller_alive": True,
+        "backend_alive": True,
+        "kernel_connected": True,
+        "kernel_execution_ready": True,
+        "kernel_probe_at": "2026-07-17T00:00:00Z",
+        "kernel_probe_latency_ms": 2.5,
+        "kernel_probe_error": None,
+    }
+    controller.session_status.return_value = health
+    controller.session_probe.return_value = health
+
+    status = client.session_status("training")
+    probe = client.session_probe("training", timeout=3)
+
+    assert isinstance(status, SessionHealthResult)
+    assert probe.kernel_execution_ready is True
+    controller.session_probe.assert_called_once_with(
+        profile=client.profile,
+        name="training",
+        timeout=3,
+    )

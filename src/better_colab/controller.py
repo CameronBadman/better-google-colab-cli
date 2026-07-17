@@ -299,6 +299,10 @@ class ControllerServer:
                         for session in store.list_sessions()
                     ]
                 }
+        if method == "session.status":
+            return self._session_status(params)
+        if method == "session.probe":
+            return await self._session_probe(params)
         if method == "execution.start":
             return self._start_execution(params)
         if method == "execution.status":
@@ -466,6 +470,57 @@ class ControllerServer:
         assert self._coordinator is not None
         self._coordinator.submit(profile, record.execution_id)
         return result
+
+    @staticmethod
+    def _session_name(params: dict[str, Any]) -> str:
+        name = params.get("name")
+        if not isinstance(name, str) or not name:
+            raise api_error(
+                "SESSION_REQUIRED",
+                "A non-empty session name is required",
+                exit_code=ExitCode.USAGE,
+                retryable=False,
+                suggested_action="specify_session",
+            )
+        return name
+
+    def _session_status(self, params: dict[str, Any]) -> dict[str, Any]:
+        profile = self._profile_from_params(params)
+        assert self._coordinator is not None
+        return self._coordinator.session_status(
+            profile,
+            self._session_name(params),
+        ).to_wire()
+
+    async def _session_probe(self, params: dict[str, Any]) -> dict[str, Any]:
+        profile = self._profile_from_params(params)
+        timeout = params.get("timeout", 10)
+        try:
+            timeout_value = float(timeout)
+        except (TypeError, ValueError) as error:
+            raise api_error(
+                "INVALID_PROBE_TIMEOUT",
+                "Probe timeout must be a positive number",
+                exit_code=ExitCode.USAGE,
+                retryable=False,
+                suggested_action="use_a_positive_timeout",
+            ) from error
+        if not math.isfinite(timeout_value) or timeout_value <= 0:
+            raise api_error(
+                "INVALID_PROBE_TIMEOUT",
+                "Probe timeout must be a finite positive number",
+                exit_code=ExitCode.USAGE,
+                retryable=False,
+                suggested_action="use_a_positive_timeout",
+            )
+        assert self._coordinator is not None
+        result = await asyncio.to_thread(
+            self._coordinator.probe_session,
+            profile,
+            self._session_name(params),
+            timeout=timeout_value,
+        )
+        return result.to_wire()
 
     def _execution_status(self, params: dict[str, Any]) -> dict[str, Any]:
         profile = self._profile_from_params(params)
