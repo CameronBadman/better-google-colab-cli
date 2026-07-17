@@ -96,7 +96,13 @@ def create_app(
         state.config_path = config
         state.logtostderr = logtostderr
         state.auth_provider = auth
-        if ctx.invoked_subcommand not in {"capabilities", "doctor"}:
+        if ctx.invoked_subcommand not in {
+            "capabilities",
+            "doctor",
+            "execution",
+            "notebook",
+            "session",
+        }:
             setup_logging(logtostderr)
 
         # Update checks are intentionally explicit. Agent-facing stdout must

@@ -85,6 +85,16 @@ During the controller migration, retained non-interactive session, file, and
 install commands also accept `--format json`. Every JSON response uses schema
 version 1 and is hard-capped at 262,144 bytes.
 
+Durable state uses a private profile-isolated SQLite database. Terminal history
+is retained indefinitely unless pruning is explicitly confirmed:
+
+```bash
+better-colab execution prune \
+  --before 2026-01-01T00:00:00Z \
+  --format json
+# Re-run with --confirm only after inspecting the dry-run result.
+```
+
 ## Documentation
 
 - [Agent-first architecture and public contracts](DESIGN.md)
@@ -95,6 +105,7 @@ version 1 and is hard-capped at 262,144 bytes.
 - [Authentication and non-Drive automation](docs/04_automation_and_utility.md)
 - [Upstream ephemeral runner design](docs/05_run_command.md)
 - [JSON v1 and typed Python API](docs/06_json_and_typed_api.md)
+- [Durable SQLite state](docs/07_durable_state.md)
 
 ## Contributing
 

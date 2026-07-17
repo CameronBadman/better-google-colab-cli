@@ -17,6 +17,7 @@ from better_colab.models import (
     NotebookCellSummary,
     OutputEvent,
     OutputPage,
+    PruneResult,
     SessionSummary,
     SourceProvenance,
 )
@@ -39,6 +40,7 @@ __all__ = [
     "NotebookCellSummary",
     "OutputEvent",
     "OutputPage",
+    "PruneResult",
     "SessionSummary",
     "SourceProvenance",
 ]

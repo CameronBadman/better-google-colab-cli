@@ -5,6 +5,8 @@ schema_version: 1
 last_updated: 2026-07-17
 change_log:
   - date: 2026-07-17
+    summary: Added schema-v1 SQLite durability, profile-isolated legacy import, protected queued-source spools, transition validation, batches, artifacts, and explicit terminal pruning.
+  - date: 2026-07-17
     summary: Implemented the typed Python facade, JSON v1 envelopes, bounded capability discovery, cursor primitives, and flat-command JSON adapters.
   - date: 2026-07-17
     summary: Established the unofficial fork identity, distribution boundary, and durable-interface architecture.
@@ -112,6 +114,12 @@ stored at `${XDG_STATE_HOME:-~/.local/state}/better-colab/controller.sqlite3`;
 protected output/source spools and immutable artifacts are siblings under
 `artifacts/`.
 
+Schema version 1 is implemented in `better_colab.storage`. The database and
+payload files are mode `0600`; Better Colab state, artifact, source, output,
+and runtime directories are mode `0700`. The store pre-creates the database
+with restrictive permissions before SQLite can open it. A newer unknown
+`user_version` is a hard conflict rather than a best-effort downgrade.
+
 The schema records profiles, sessions, executions, append-only transitions,
 batches, ordered output chunks, artifacts, and kernel-connection evidence.
 Profile identity incorporates normalized config path, authentication provider,
@@ -121,6 +129,31 @@ On first access, the matching upstream `sessions.json` is imported
 non-destructively and retained as a backup. The import hash and timestamp are
 recorded; later legacy-file changes produce a diagnostic, never an automatic
 second import.
+
+The profile key is SHA-256 over canonical resolved config and OAuth paths plus
+the normalized auth provider. Profile-filtered keys allow OAuth2 and ADC (or
+separate `--config` files) to use the same controller database without seeing
+one another's sessions or execution records.
+
+Execution creation writes and fsyncs the exact source snapshot to a protected
+temporary file, atomically renames it, then inserts the execution and its
+`created -> queued` transition journal in one `BEGIN IMMEDIATE` transaction.
+If any insert fails, both database state and the source file are removed.
+Identical idempotency-key reuse returns the original record; a different
+canonical request fails before another spool is created.
+
+Source disposal is biased toward at-most-once safety: the queued source is
+unlinked before committing confirmed dispatch or terminal ambiguity. A crash
+in that narrow window can remove replayability but can never make an already
+sent request replayable. Session rows have no cascading ownership over
+executions, so history survives stop/pruning of runtime assignments.
+
+`execution prune` is implemented as a typed/store/CLI operation. Omitting
+confirmation is always a dry run; only terminal states older than the supplied
+timezone-aware timestamp are eligible. Confirmed deletion cascades journals,
+output indexes, batch memberships, and artifact metadata, then unlinks the
+pre-enumerated artifact files. Queued/running/disconnected work is never
+matched.
 
 ## Execution proof and recovery
 

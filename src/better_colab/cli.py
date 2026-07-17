@@ -1,6 +1,6 @@
 """The ``better-colab`` command-line entry point."""
 
-from better_colab import commands
+from better_colab import commands, durable_commands
 from colab_cli.cli import create_app
 
 
@@ -10,6 +10,7 @@ app = create_app(
     include_legacy_skill=False,
 )
 commands.register(app)
+durable_commands.register(app)
 
 
 def main() -> None:

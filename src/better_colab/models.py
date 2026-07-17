@@ -181,3 +181,10 @@ class NotebookCellSummary(PublicModel):
     source_sha256: str
     cell_id: str | None = None
 
+
+class PruneResult(PublicModel):
+    dry_run: bool
+    matched: int
+    deleted: int
+    execution_ids: list[str]
+    artifact_bytes: int
