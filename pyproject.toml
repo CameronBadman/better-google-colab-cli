@@ -44,7 +44,7 @@ dependencies = [
 ]
 
 [project.scripts]
-better-colab = "better_colab.cli:main"
+better-colab = "better_colab.entrypoint:main"
 
 [project.urls]
 Homepage = "https://github.com/CameronBadman/better-google-colab-cli"

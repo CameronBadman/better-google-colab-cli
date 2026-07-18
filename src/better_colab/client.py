@@ -38,7 +38,6 @@ from better_colab.models import (
     SessionStopResult,
     SessionSummary,
 )
-from better_colab.notebooks import NotebookDocument
 from better_colab.protocol import (
     DEFAULT_EXECUTION_LIMIT,
     DEFAULT_NOTEBOOK_CELL_LIMIT,
@@ -46,6 +45,12 @@ from better_colab.protocol import (
     SCHEMA_VERSION,
 )
 from better_colab.storage import DurableStore, ProfileSpec, StatePaths
+
+
+def _notebook_document(path):
+    from better_colab.notebooks import NotebookDocument
+
+    return NotebookDocument(path)
 
 
 def _package_version() -> str:
@@ -576,7 +581,7 @@ class BetterColabClient:
                 retryable=False,
                 suggested_action="choose_detach_or_wait_timeout",
             )
-        cells = NotebookDocument(notebook).execution_cells(
+        cells = _notebook_document(notebook).execution_cells(
             cell_ids=cell_ids,
             indexes=cell_indexes,
         )
@@ -641,7 +646,7 @@ class BetterColabClient:
         cursor: str | None = None,
         limit: int = DEFAULT_NOTEBOOK_CELL_LIMIT,
     ) -> NotebookCellsResult:
-        return NotebookDocument(path).cells(cursor=cursor, limit=limit)
+        return _notebook_document(path).cells(cursor=cursor, limit=limit)
 
     def notebook_cell(
         self,
@@ -650,7 +655,7 @@ class BetterColabClient:
         cell_id: str | None = None,
         index: int | None = None,
     ) -> NotebookCell:
-        return NotebookDocument(path).cell(cell_id=cell_id, index=index)
+        return _notebook_document(path).cell(cell_id=cell_id, index=index)
 
     def update_notebook_cell(
         self,
@@ -661,7 +666,7 @@ class BetterColabClient:
         index: int | None = None,
         expected_sha256: str | None = None,
     ) -> NotebookCell:
-        return NotebookDocument(path).update_source(
+        return _notebook_document(path).update_source(
             source=source,
             cell_id=cell_id,
             index=index,
@@ -674,7 +679,7 @@ class BetterColabClient:
         *,
         expected_notebook_sha256: str,
     ) -> NotebookIdsResult:
-        return NotebookDocument(path).assign_ids(
+        return _notebook_document(path).assign_ids(
             expected_notebook_sha256=expected_notebook_sha256,
         )
 
@@ -699,7 +704,7 @@ class BetterColabClient:
                 retryable=False,
                 suggested_action="execute_an_identified_notebook_cell",
             )
-        return NotebookDocument(record.source_path).write_execution_output(
+        return _notebook_document(record.source_path).write_execution_output(
             record=record,
             events=self.store.list_output_events(execution_id),
         )

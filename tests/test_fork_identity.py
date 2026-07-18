@@ -35,7 +35,7 @@ def test_core_distribution_installs_only_better_colab():
 
     assert metadata["project"]["name"] == "better-google-colab-cli"
     assert metadata["project"]["scripts"] == {
-        "better-colab": "better_colab.cli:main"
+        "better-colab": "better_colab.entrypoint:main"
     }
     assert metadata["project"]["urls"] == {
         "Homepage": "https://github.com/CameronBadman/better-google-colab-cli",
