@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
+
 import pytest
 from unittest.mock import MagicMock
 
@@ -35,5 +37,13 @@ def mock_common_state(mocker):
     mocker.patch("colab_cli.commands.execution.ColabRuntime")
     mocker.patch("colab_cli.commands.automation.ColabRuntime")
     mocker.patch("colab_cli.commands.run.ColabRuntime")
+    mocker.patch(
+        "colab_cli.commands.execution.compatibility_session_lease",
+        side_effect=lambda *_args, **_kwargs: contextlib.nullcontext(),
+    )
+    mocker.patch(
+        "colab_cli.commands.automation.compatibility_session_lease",
+        side_effect=lambda *_args, **_kwargs: contextlib.nullcontext(),
+    )
 
     return mock_state

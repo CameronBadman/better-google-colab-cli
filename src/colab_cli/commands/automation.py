@@ -21,6 +21,7 @@ import typer
 from rich.console import Console
 from typing_extensions import Annotated
 
+from better_colab.compatibility import compatibility_session_lease
 from better_colab.errors import ExitCode
 from better_colab.legacy import (
     emit_error as emit_json_error,
@@ -196,13 +197,14 @@ def auth(
     name = state.resolve_session(session)
     code = "import os\nos.environ['USE_AUTH_EPHEM'] = '0'\nfrom google.colab import auth\nauth.authenticate_user()"
     typer.echo(f"[colab] Starting Google Auth flow on {name}...")
-    run_automation(
-        name,
-        "auth",
-        code,
-        allow_stdin=True,
-        timeout=INTERACTIVE_AUTOMATION_TIMEOUT_SEC,
-    )
+    with compatibility_session_lease(name):
+        run_automation(
+            name,
+            "auth",
+            code,
+            allow_stdin=True,
+            timeout=INTERACTIVE_AUTOMATION_TIMEOUT_SEC,
+        )
 
 
 def drivemount(
@@ -217,14 +219,15 @@ def drivemount(
     name = state.resolve_session(session)
     code = f"from google.colab import drive\ndrive.mount('{path}')"
     typer.echo(f"[colab] Mounting Google Drive to '{path}' on {name}...")
-    run_automation(
-        name,
-        "drivemount",
-        code,
-        allow_stdin=True,
-        path=path,
-        timeout=INTERACTIVE_AUTOMATION_TIMEOUT_SEC,
-    )
+    with compatibility_session_lease(name):
+        run_automation(
+            name,
+            "drivemount",
+            code,
+            allow_stdin=True,
+            path=path,
+            timeout=INTERACTIVE_AUTOMATION_TIMEOUT_SEC,
+        )
 
 
 def install(

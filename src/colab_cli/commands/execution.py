@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import datetime
+import contextlib
 import nbformat
 import os
 import re
@@ -24,6 +25,7 @@ from rich.console import Console
 from typing import Optional
 from typing_extensions import Annotated
 
+from better_colab.compatibility import compatibility_session_lease
 from colab_cli.runtime import ColabRuntime
 from colab_cli.utils import handle_image, is_terminal_error, render_display_data
 from colab_cli.console import connect_console
@@ -258,76 +260,89 @@ def repl(
         typer.echo(f"[colab] Session '{name}' not found.")
         raise typer.Exit(1)
 
-    def on_started(kid):
-        s.kernel_id = kid
-        state.store.add(s)
-
-    def on_sess_started(sid):
-        s.session_id = sid
-        state.store.add(s)
-
-    runtime = ColabRuntime(
-        s.url,
-        s.token,
-        kernel_id=s.kernel_id,
-        session_id=s.session_id,
-        on_kernel_started=on_started,
-        on_session_started=on_sess_started,
+    interactive = is_stdin_tty()
+    lease = (
+        compatibility_session_lease(name)
+        if interactive
+        else contextlib.nullcontext()
     )
-    try:
-        # Ensure we are in /content which is the standard Colab working directory
-        runtime.execute_code(
-            "import os; os.makedirs('/content', exist_ok=True); os.chdir('/content')"
-        )
-    except Exception as e:
-        if is_terminal_error(e):
-            typer.echo(
-                f"[colab] Session '{name}' appears to be lost (404/401). Cleaning up."
-            )
-            state.prune_session(name)
-            raise typer.Exit(1)
-        raise e
-
-    if not is_stdin_tty():
-        code = sys.stdin.read()
-        if not code.strip():
-            raise typer.Exit(0)
-
-        s.last_execution = (
-            "stdin",
-            None,
-            datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        )
-        s.running = "repl(stdin)"
-        state.store.add(s)
-        try:
-            outputs = runtime.execute_code(
-                code, output_hook=lambda o: display_output(o, output_image)
-            )
-            state.history.log_event(
-                name, "execution", {"code": code, "outputs": outputs, "source": "piped"}
-            )
-        finally:
-            s.running = None
+    with lease:
+        def on_started(kid):
+            s.kernel_id = kid
             state.store.add(s)
-            runtime.stop()
-    else:
-        from colab_cli.repl import ColabREPL
 
-        s.running = "repl"
-        state.store.add(s)
-        try:
-            repl_inst = ColabREPL(
-                runtime,
-                session_name=s.name,
-                history_logger=state.history,
-                output_image=output_image,
-            )
-            state.history.log_event(name, "repl_started", {})
-            repl_inst.run()
-        finally:
-            s.running = None
+        def on_sess_started(sid):
+            s.session_id = sid
             state.store.add(s)
+
+        runtime = ColabRuntime(
+            s.url,
+            s.token,
+            kernel_id=s.kernel_id,
+            session_id=s.session_id,
+            on_kernel_started=on_started,
+            on_session_started=on_sess_started,
+        )
+        try:
+            # Ensure we are in /content, the standard Colab working directory.
+            runtime.execute_code(
+                "import os; os.makedirs('/content', exist_ok=True); "
+                "os.chdir('/content')"
+            )
+        except Exception as e:
+            if is_terminal_error(e):
+                typer.echo(
+                    f"[colab] Session '{name}' appears to be lost "
+                    "(404/401). Cleaning up."
+                )
+                state.prune_session(name)
+                raise typer.Exit(1)
+            raise e
+
+        if not interactive:
+            code = sys.stdin.read()
+            if not code.strip():
+                runtime.stop()
+                raise typer.Exit(0)
+
+            s.last_execution = (
+                "stdin",
+                None,
+                datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            )
+            s.running = "repl(stdin)"
+            state.store.add(s)
+            try:
+                outputs = runtime.execute_code(
+                    code,
+                    output_hook=lambda o: display_output(o, output_image),
+                )
+                state.history.log_event(
+                    name,
+                    "execution",
+                    {"code": code, "outputs": outputs, "source": "piped"},
+                )
+            finally:
+                s.running = None
+                state.store.add(s)
+                runtime.stop()
+        else:
+            from colab_cli.repl import ColabREPL
+
+            s.running = "repl"
+            state.store.add(s)
+            try:
+                repl_inst = ColabREPL(
+                    runtime,
+                    session_name=s.name,
+                    history_logger=state.history,
+                    output_image=output_image,
+                )
+                state.history.log_event(name, "repl_started", {})
+                repl_inst.run()
+            finally:
+                s.running = None
+                state.store.add(s)
 
 
 def console(
@@ -343,22 +358,24 @@ def console(
     if not s:
         typer.echo(f"[colab] Session '{name}' not found.")
         raise typer.Exit(1)
-    state.history.log_event(s.name, "console_started", {})
-    s.running = "console"
-    state.store.add(s)
-    try:
-        connect_console(s)
-    except Exception as e:
-        if is_terminal_error(e):
-            typer.echo(
-                f"[colab] Session '{name}' appears to be lost (404/401). Cleaning up."
-            )
-            state.prune_session(name)
-            raise typer.Exit(1)
-        raise e
-    finally:
-        s.running = None
+    with compatibility_session_lease(name):
+        state.history.log_event(s.name, "console_started", {})
+        s.running = "console"
         state.store.add(s)
+        try:
+            connect_console(s)
+        except Exception as e:
+            if is_terminal_error(e):
+                typer.echo(
+                    f"[colab] Session '{name}' appears to be lost "
+                    "(404/401). Cleaning up."
+                )
+                state.prune_session(name)
+                raise typer.Exit(1)
+            raise e
+        finally:
+            s.running = None
+            state.store.add(s)
 
 
 def register(app: typer.Typer):
