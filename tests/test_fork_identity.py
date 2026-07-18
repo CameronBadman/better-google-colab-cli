@@ -71,9 +71,17 @@ def test_better_surface_excludes_drive_and_legacy_surface_retains_it():
     assert "drivemount" in compatibility_help.output
 
 
-def test_better_surface_never_performs_implicit_update_checks(mock_common_state):
+def test_better_surface_never_performs_implicit_update_checks(
+    mock_common_state,
+    mocker,
+):
+    from better_colab import SessionListResult
     from better_colab.cli import app as better_app
 
+    mocker.patch(
+        "better_colab.durable_commands.BetterColabClient.list_sessions",
+        return_value=SessionListResult(sessions=[]),
+    )
     with patch("colab_cli.auto_update.run_background_check") as check:
         result = runner.invoke(better_app, ["sessions"])
 
@@ -97,4 +105,3 @@ def test_repository_uses_neutral_ci_and_release_workflows():
     assert not (ROOT / "cloudbuild.yaml").exists()
     assert (ROOT / ".github" / "workflows" / "ci.yml").is_file()
     assert (ROOT / ".github" / "workflows" / "release.yml").is_file()
-

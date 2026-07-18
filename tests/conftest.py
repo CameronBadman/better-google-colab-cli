@@ -31,6 +31,8 @@ def mock_common_state(mocker):
     # surface unless a root Typer callback explicitly opts into durable
     # wrappers.
     mock_state.durable_wrappers = False
+    # CLI unit tests must not append to the user's real ~/.config log file.
+    mocker.patch("colab_cli.cli.setup_logging")
 
     # Default behavior for sync_sessions
     mock_state.sync_sessions.return_value = ({}, [])
