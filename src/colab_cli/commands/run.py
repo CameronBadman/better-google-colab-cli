@@ -38,6 +38,7 @@ from typing import List, Optional
 import typer
 from typing_extensions import Annotated
 
+from better_colab.durable_commands import _client_from_cli_state
 from colab_cli.client import (
     Accelerator,
     ColabRequestError,
@@ -130,7 +131,12 @@ def _systemexit_code(out) -> int:
       - `sys.exit(<int>)`                                -> <int>
       - `sys.exit('msg')` (any non-int)                  -> 1
     """
-    evalue = (out.get("evalue") or "").strip()
+    return _systemexit_value_code(out.get("evalue"))
+
+
+def _systemexit_value_code(value: str | None) -> int:
+    """Map a durable SystemExit value to CPython's shell exit convention."""
+    evalue = (value or "").strip()
     if evalue in ("", "None", "0"):
         return 0
     try:
@@ -256,6 +262,18 @@ def run_command(
     if not os.path.isfile(script):
         typer.echo(f"[colab] Script not found: {script}", err=True)
         raise typer.Exit(2)
+
+    if state.durable_wrappers:
+        _durable_run(
+            script=script,
+            script_args=script_args,
+            session=session,
+            gpu=gpu,
+            tpu=tpu,
+            keep=keep,
+            timeout=timeout,
+        )
+        return
 
     name = session or f"run-{uuid.uuid4().hex[:6]}"
     variant, accelerator = _resolve_accelerator(gpu, tpu)
@@ -420,6 +438,63 @@ def run_command(
             _teardown(name, s, reason=cleanup_reason)
 
     if exit_code != 0:
+        raise typer.Exit(exit_code)
+
+
+def _durable_run(
+    *,
+    script: str,
+    script_args: list[str],
+    session: str | None,
+    gpu: str | None,
+    tpu: str | None,
+    keep: bool,
+    timeout: float | None,
+) -> None:
+    """Compose the typed session and execution APIs for core ``run``."""
+    from colab_cli.commands.execution import (
+        FAILED_EXECUTION_STATES,
+        _render_durable_page,
+    )
+
+    name = session or f"run-{uuid.uuid4().hex[:6]}"
+    source = _build_script_payload(script, script_args)
+    with _client_from_cli_state() as client:
+        client.ensure_session(name, gpu=gpu, tpu=tpu)
+        try:
+            result = client.start_execution(
+                session=name,
+                source=source,
+                provenance={
+                    "kind": "file",
+                    "path": os.path.realpath(script),
+                },
+                execution_timeout=timeout,
+            )
+            _render_durable_page(
+                client,
+                result.output,
+                None,
+                suppress_error_names={"SystemExit"},
+            )
+        finally:
+            if not keep:
+                client.stop_session(name)
+
+    exit_code = 0
+    if result.error_name == "SystemExit":
+        exit_code = _systemexit_value_code(result.error_value)
+        if exit_code == 1 and result.error_value:
+            typer.echo(result.error_value, err=True)
+    elif result.state in FAILED_EXECUTION_STATES:
+        if result.error_name:
+            typer.echo(
+                f"{result.error_name}: {result.error_value or ''}",
+                err=True,
+            )
+        exit_code = 1
+
+    if exit_code:
         raise typer.Exit(exit_code)
 
 

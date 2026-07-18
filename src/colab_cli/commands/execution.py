@@ -134,7 +134,13 @@ def _durable_session_name(client, requested: str | None) -> str:
     raise typer.Exit(1)
 
 
-def _render_durable_page(client, page: OutputPage, output_image: str | None) -> None:
+def _render_durable_page(
+    client,
+    page: OutputPage,
+    output_image: str | None,
+    *,
+    suppress_error_names: set[str] | None = None,
+) -> None:
     current = page
     while True:
         for event in current.events:
@@ -144,7 +150,16 @@ def _render_durable_page(client, page: OutputPage, output_image: str | None) -> 
                 )
                 stream.write(event.text)
                 stream.flush()
-            if event.event_type == "error" and event.traceback:
+            suppressed_error = (
+                event.event_type == "error"
+                and suppress_error_names is not None
+                and event.error_name in suppress_error_names
+            )
+            if (
+                event.event_type == "error"
+                and event.traceback
+                and not suppressed_error
+            ):
                 sys.stderr.write("".join(event.traceback) + "\n")
             if (
                 output_image is not None
