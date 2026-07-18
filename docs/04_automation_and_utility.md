@@ -1,5 +1,6 @@
 ---
 log:
+2026-07-18: Routed `better-colab install` through durable execution while retaining `colab install` as the direct compatibility path. Package arguments are emitted as safe Python literals; local requirements bytes are embedded in the protected queued source, recreated in a deterministic remote temporary file, and removed after pip/uv finishes. JSON mode suppresses installer output and maps proven execution failure to `INSTALL_FAILED`/exit 1. Also fixed `whoami` to resolve the callback-configured auth state lazily.
 2026-06-11: Replaced the `oauth2` provider's `run_local_server()` (localhost redirect) with a remote copy-paste flow (`_run_remote_flow` in `auth.py`). The CLI now prints an authorization URL built with `redirect_uri=https://sdk.cloud.google.com/applicationdefaultauthcode.html` and `token_usage=remote`, then reads the pasted authorization code via `input()` and exchanges it with `flow.fetch_token(code=...)`. This is the same flow `gcloud auth application-default login` uses and works identically in local and remote/headless/container environments, removing the heuristic of whether to auto-open a browser. Confirmed server-side acceptance with a live GET-only check against the bundled cloud-SDK client (`764086051850-...`); the OOB redirect and a non-bundled client id were both verified to be rejected (`OOB flow has been blocked` / `redirect_uri_mismatch`). Unit tests in `tests/test_auth.py` assert no localhost server is started, the redirect URI + `token_usage=remote` are set, and the pasted code is exchanged.
 2026-06-01: Enabled `colab update --install` self-update on macOS in addition to Linux. Refactored platform check logic to keep the implementation DRY and updated both tests and documentation. Also, on these platforms, an additional message is shown recommending `colab update --install` to upgrade in place, positioned above the standard `pip`/`uv` installation command.
 2026-05-29: Added default OAuth2 client config (`oauth_config.json`) as a bundled package resource and restored fallback loading logic in `get_credentials()`. The CLI now falls back to using these default credentials when no explicit local config is found. Added `integration/repro_bundled_oauth` integration test.
@@ -121,6 +122,15 @@ remediation guidance) rather than silently after ~1 minute via the daemon.
     subprocess.check_call([sys.executable, "-m", "pip", "install", "..."])`
 -   **Requirements File**: Upload `requirements.txt` if provided with `-r` and
     then run `pip install -r`.
+
+On the primary surface, `better-colab install` resolves an existing durable
+session and submits the installer as a normal controller execution. It never
+uses the legacy Contents API: requirement bytes are base64-embedded in the
+mode-`0600` queued source, decoded to a digest-named `/tmp` file on the VM,
+and removed in a `finally` block. `uv pip install --system` is attempted first,
+then ordinary `pip` is the fallback. Text mode renders bounded output pages.
+JSON mode emits one schema-v1 result and maps a proven kernel error to
+`INSTALL_FAILED` with exit 1.
 
 ### 3. Drive Mounting (`colab drivemount`)
 

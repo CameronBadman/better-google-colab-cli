@@ -85,6 +85,13 @@ During the controller migration, retained non-interactive session, file, and
 install commands also accept `--format json`. Every JSON response uses schema
 version 1 and is hard-capped at 262,144 bytes.
 
+The familiar flat core workflows now share durable state: `new`, `sessions`,
+`status`, and `stop` adapt the typed session API, while `exec`, piped `repl`,
+`run`, and `install` dispatch through the controller. The optional `colab`
+executable retains upstream direct-runtime compatibility. Notebook exec is
+read-only unless `--write-output` explicitly requests an `*_output.ipynb`
+copy.
+
 Durable state uses a private profile-isolated SQLite database. Terminal history
 is retained indefinitely unless pruning is explicitly confirmed:
 

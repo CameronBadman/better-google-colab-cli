@@ -1,5 +1,6 @@
 ---
 log:
+2026-07-18: Added the `better-colab run` durable adapter. It composes typed session ensure, controller execution, and lease-aware session stop; preserves arbitrary script arguments, bounded output, native `SystemExit` codes, and `--keep`; and cleans up terminal failures. The optional `colab run` retains the upstream direct allocation/runtime teardown implementation. Verified live on the same CPU session used for flat exec/repl/install.
 2026-05-12: Initial design and implementation of `colab run <script.py> [args...]`. Combines `colab new` + `colab exec` + `colab stop` into a single fire-and-forget invocation so a Python file can use `#!/usr/bin/env -S colab run` as a shebang line and execute on a freshly-allocated Colab VM. Adds `--keep` (skip auto-stop), `--gpu` / `--tpu` (passthrough to session creation), `-s/--session` (name the ephemeral session), and propagates the script's exit status (non-zero on any uncaught exception in the kernel). The script's `sys.argv` is re-set inside the kernel to mirror native `python script.py arg1 arg2` semantics, and `__name__` is set to `"__main__"`.
 2026-05-12: Native CPython exit-code semantics for `sys.exit()` / `raise SystemExit(...)` from the script body. The Colab kernel reports a `SystemExit` as `output_type=='error'`, which under the previous logic would have (a) printed the IPython traceback (`An exception has occurred, use %tb...`) and (b) flagged the run as a failure regardless of the integer exit code. Now: `sys.exit()` / `sys.exit(0)` exit 0 silently; `sys.exit(N)` exits N; `sys.exit('msg')` exits 1 (matching CPython). The IPython "To exit: use 'exit', 'quit', or Ctrl-D." UserWarning is filtered via the prelude. Encoded after running `examples/gpu_hello.py` end-to-end and seeing the noisy `SystemExit: 0` traceback at the end of an otherwise-successful GPU run.
 2026-06-04: Bumped the default value of the `--timeout` flag from 10.0s to 30.0s so short-but-silent tasks aren't prematurely killed out of the box. Mirrors the same change for `colab exec`.
@@ -46,6 +47,19 @@ print(torch.cuda.get_device_name(0))
 > The `-S` flag of `env` is necessary on Linux/macOS to allow multiple words after `colab run` in a shebang line; without it the kernel passes the whole tail as one argument.
 
 ## Behavior
+
+### Primary `better-colab` surface
+
+`better-colab run` composes `BetterColabClient.ensure_session`,
+`start_execution`, and `stop_session`. It validates and snapshots the local
+script before allocation, then dispatches the argv/`__main__` wrapper through
+the same at-most-once durable controller path as `execution start`. Unless
+`--keep` is set, terminal success, user exception, and `SystemExit` all reach
+the lease-aware stop in `finally`. `SystemExit(0)` is silent success,
+`SystemExit(N)` returns `N`, and a string value is printed to stderr with exit
+1. `--keep` retains the durable session and its state for later calls.
+
+### Optional `colab` compatibility surface
 
 1. **Allocate**: Creates a fresh session (mirrors `colab new` end-to-end: `assign` → keep-alive pre-flight → spawn keep-alive daemon → persist `SessionState`). Session name defaults to `run-<6 hex>`.
 2. **Execute**: Reads the script file. Prepends a deterministic prelude that re-sets `sys.argv` and `__name__` so the script body sees the same execution context as `python script.py arg1 arg2`:

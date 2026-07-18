@@ -1,5 +1,6 @@
 ---
 log:
+2026-07-18: Routed `better-colab exec` and piped `repl` through controller-owned durable execution while preserving the optional `colab` direct-runtime path. Flat source execution now returns nonzero for proven user-code failure, uses bounded cursor output, and never allocates implicitly. Whole-notebook exec uses durable child executions, remains read-only by default, and writes only an explicit `*_output.ipynb` copy with `--write-output`. Interactive compatibility commands now acquire exclusive controller session leases.
 2026-07-17: Added the separate Better Colab durable execution path. `better-colab execution start|status|wait|output|cancel|list` is controller-owned, persists the exact message ID before one raw send, and requires matching execute-reply plus IOPub idle proof. The retained flat `exec`, REPL, and console behavior described below is unchanged pending the compatibility-wrapper milestone.
 
 2026-05-07: Fixed `colab console` piped-stdin handling. Previously a piped invocation (e.g. `echo 'cmd' | colab console -s s`) sent the command and then hung indefinitely because the previous EOF handler emitted a bare `\x04` (Ctrl-D), which the remote `tmux`-wrapped bash treats as a literal character rather than a session terminator. The new handler sends `exit\n` (which bash actually exits on) and then closes the websocket from the client side after a short grace period (`PIPED_EOF_GRACE_SECONDS = 0.5s`) so any tail output (bash `logout`, tmux `[exited]`) makes it back to the user. TTY mode is unchanged: real-terminal EOF is left to the remote shell. Verified live: `echo 'echo HELLO' | colab console -s s` now exits in ~1.2s instead of hanging.
@@ -13,6 +14,30 @@ log:
 
 ## Overview
 Execution involves sending Python code (or shell commands) to the Jupyter kernel running on the Colab VM and processing the stream of output messages.
+
+## Better Colab flat wrappers
+
+`better-colab exec` is start-plus-wait over the durable execution API. It
+requires an existing durable session, captures local file/stdin bytes before
+queueing, streams bounded output pages until exhausted, and exits 1 for
+`error`, `interrupted`, `timed_out`, or `unknown`. Its `--timeout` is a remote
+execution deadline beginning only after dispatch is confirmed.
+
+Piped `better-colab repl` uses the same one-shot durable path, so kernel state
+remains available to later processes. TTY REPL, console, VM authentication,
+and compatibility-only Drive flows retain their specialized transports and
+acquire an exclusive session lease. The controller refuses that lease while
+durable work is active, closes its transport while leased, and reconnects with
+a readiness probe after release.
+
+For `.ipynb` input, flat exec selects all code cells as one durable batch and
+continues after cell errors to preserve whole-notebook compatibility. The
+source notebook is never mutated by default. `--write-output` first creates a
+named `*_output.ipynb` copy; guarded writeback targets only that copy.
+
+The optional `colab` executable keeps the upstream direct-kernel execution
+path, except that notebook output copying is likewise explicit through
+`--write-output`.
 
 ## Approach
 

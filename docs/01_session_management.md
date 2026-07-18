@@ -1,5 +1,6 @@
 ---
 log:
+2026-07-18: Added the core durable flat-session adapters. `better-colab new`, `sessions`, `status`, and `stop` now share `BetterColabClient` models and SQLite profile state; stop acquires an exclusive non-reconnecting controller lease before unassignment. The optional `colab` executable retains the upstream JSON-file/session-backend workflow. Verified live with one CPU assignment and final local/server orphan checks.
 2026-06-15: Switched the keep-alive daemon from the `colab.pa.googleapis.com` `RuntimeService/KeepAliveAssignment` RPC to a Tunnel Frontend HTTP ping (`GET /tun/m/<endpoint>/keep-alive/` with `X-Colab-Tunnel: Google`) on `colab.research.google.com`. The RPC required `serviceusage` consumer access to Colab's internal project `1014160490159`, which ordinary user accounts lack, so every external user hit HTTP 403 `USER_PROJECT_DENIED` and their CLI sessions were idle-pruned within minutes (issue #14). Reproduced live with a third-party account; verified the tunnel ping is accepted by the same bearer-token credential that already works for `assign`. A `ReadTimeout` on the ping is treated as success (TFE records activity before forwarding to the often-non-responding VM). Generalized the pre-flight remediation messaging away from the now-irrelevant `colaboratory`/`pa.googleapis.com` framing, and removed the dead grpc-web client-registry/API-key code.
 2026-06-10: Replaced the POSIX-only `fcntl.flock` file locking in `_LockedFileStore` with the cross-platform `filelock` library (reported broken on Windows). Reads use `ReadWriteLock.read_lock()` (shared) and writes use `write_lock()` (exclusive), preserving the original `LOCK_SH`/`LOCK_EX` semantics. The lock is constructed with `is_singleton=False` so two `StateStore` instances for the same path in one process don't collapse into a single reentrant lock (which would raise `RuntimeError` on multi-threaded write contention). Added shared-read, cross-process exclusion, and multi-thread/multi-process regression tests.
 ---
@@ -8,6 +9,25 @@ log:
 
 ## Overview
 Session management involves interacting with the Colab backend to allocate, monitor, and terminate runtimes.
+
+## Better Colab durable adapters
+
+The primary `better-colab` surface stores sessions in the profile-isolated
+controller database. Its flat commands are wrappers over the same synchronous
+API used by the agent-oriented group:
+
+- `better-colab new -s NAME` calls `ensure_session` and allocates only when the
+  name is absent.
+- `better-colab sessions` lists the active profile's durable records.
+- `better-colab status -s NAME` returns the seven-field controller/kernel
+  health model; status without a name lists durable sessions.
+- `better-colab stop -s NAME` acquires an exclusive session lease, terminates
+  the typed keep-alive helper, unassigns the endpoint, and deletes the durable
+  session. The lease is released without reconnecting to a stopped runtime.
+
+The grouped `session ensure|list|status|probe|stop` commands remain the
+canonical machine-facing interface. The optional `colab` executable retains
+the upstream `sessions.json` and server-synchronization behavior.
 
 ## Runtime Parameters
 

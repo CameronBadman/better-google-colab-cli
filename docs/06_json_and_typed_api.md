@@ -1,8 +1,10 @@
 ---
 title: JSON v1 and typed Python API
 status: implemented
-last_updated: 2026-07-17
+last_updated: 2026-07-18
 change_log:
+  - date: 2026-07-18
+    summary: Made the core flat session/install adapters consume typed durable models and JSON errors while preserving the optional direct compatibility surface.
   - date: 2026-07-17
     summary: Added typed notebook inspection/mutation/writeback and parent/child batch start/status/wait/cancel operations.
   - date: 2026-07-17
@@ -71,9 +73,12 @@ the following are always serialized: `controller_alive`, `backend_alive`,
 
 ## Flat-command migration
 
-The retained `new`, `sessions`, `status`, `restart-kernel`, `stop`, `ls`, `rm`,
-`upload`, `download`, and `install` commands accept `--format json` on both
-console surfaces. Text remains their default. JSON mode:
+The retained non-interactive flat commands continue to accept `--format json`
+where applicable. On `better-colab`, `new`, `sessions`, `status`, `stop`, and
+`install` now consume the same typed durable operations as their grouped
+counterparts. The optional `colab` surface keeps the direct compatibility
+adapters. Retained file and restart adapters remain compatibility operations.
+Text remains the default. JSON mode:
 
 - writes one envelope and no progress text to stdout;
 - never returns runtime URLs or bearer tokens;

@@ -2,8 +2,10 @@
 title: Better Colab agent-first architecture
 status: in-progress
 schema_version: 1
-last_updated: 2026-07-17
+last_updated: 2026-07-18
 change_log:
+  - date: 2026-07-18
+    summary: Routed the core flat session, execution, run, and install workflows through typed durable state and the controller; added exclusive compatibility leases, explicit notebook output copies, and live wrapper verification.
   - date: 2026-07-17
     summary: Added path-namespaced notebook inspection and guarded mutation, explicit output writeback, atomic child-per-cell batches, stop/continue/cancel policy, scoped controller metadata snapshots, and live stateful verification.
   - date: 2026-07-17
@@ -82,11 +84,13 @@ a long manual in an agent skill. `better-colab doctor` is side-effect-free and
 does not initialize logging, authentication, controller state, or a network
 client.
 
-During migration, retained non-interactive flat session, file, and install
-commands also accept `--format json`. Their default remains human-readable
-text for upstream compatibility. JSON mode suppresses progress and kernel
-installer output, omits protected runtime tokens, and routes errors through
-the same stable envelope and exit-code mapping.
+The retained flat commands are adapters, not a second execution engine.
+On `better-colab`, `new`, `sessions`, `status`, and `stop` use the typed
+SQLite session operations; `exec`, piped `repl`, `run`, and `install` dispatch
+through the durable controller. The optional `colab` executable keeps the
+upstream direct-runtime behavior. Both surfaces retain human-readable text by
+default, and non-interactive JSON adapters suppress progress and protected
+runtime data.
 
 The typed Python layer returns the same public models without importing Typer,
 Rich, or terminal rendering. `BetterColabClient` implements capabilities,
@@ -114,7 +118,10 @@ detached controller consumes cached credentials only and returns
 Waits are condition-driven controller requests rather than CLI status polling.
 Normal controller stop refuses while work is active. Forced stop marks affected
 executions uncertain. Interactive legacy commands take an exclusive session
-lease and temporarily release the controller's kernel connection.
+lease and temporarily release the controller's kernel connection. Lease
+acquisition is refused while durable work is active; release reconnects and
+nonce-probes the same kernel identity. Session stop uses a non-reconnecting
+lease before unassigning.
 
 The process/election/protocol foundation is implemented. Clients first attempt
 a handshake, then serialize startup through a separate mode-`0600` election
