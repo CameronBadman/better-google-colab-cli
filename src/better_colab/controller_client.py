@@ -284,6 +284,43 @@ class ControllerClient:
             timeout=max(self.connect_timeout, timeout + 1),
         )
 
+    def acquire_session_lease(
+        self,
+        *,
+        profile: ProfileSpec,
+        name: str,
+    ) -> dict[str, Any]:
+        self.ensure_running()
+        params = self._profile_params(profile)
+        params["name"] = name
+        return self.request(
+            "session.lease.acquire",
+            params,
+            timeout=max(self.connect_timeout, 6),
+        )
+
+    def release_session_lease(
+        self,
+        *,
+        profile: ProfileSpec,
+        name: str,
+        lease_id: str,
+        reconnect: bool,
+    ) -> dict[str, Any]:
+        params = self._profile_params(profile)
+        params.update(
+            {
+                "name": name,
+                "lease_id": lease_id,
+                "reconnect": reconnect,
+            }
+        )
+        return self.request(
+            "session.lease.release",
+            params,
+            timeout=max(self.connect_timeout, 12),
+        )
+
     def start_execution(
         self,
         *,

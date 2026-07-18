@@ -66,12 +66,19 @@ class _ProbeRequest:
     error: BaseException | None = None
 
 
+@dataclass
+class _TransportCloseRequest:
+    completed: threading.Event
+    error: BaseException | None = None
+
+
 @dataclass(frozen=True)
 class _WorkItem:
     kind: str
     execution_id: str | None = None
     batch_id: str | None = None
     probe: _ProbeRequest | None = None
+    transport_close: _TransportCloseRequest | None = None
 
 
 def _default_transport_factory(session: StoredSession) -> ExecutionTransport:
@@ -213,6 +220,22 @@ class _KernelWorker:
         assert request.result is not None
         return request.result
 
+    def close_transport(self, *, timeout: float = 5) -> None:
+        request = _TransportCloseRequest(completed=threading.Event())
+        self.items.put(
+            _WorkItem(kind="transport_close", transport_close=request)
+        )
+        if not request.completed.wait(timeout=timeout):
+            raise api_error(
+                "SESSION_LEASE_TIMEOUT",
+                "Timed out releasing the controller kernel connection",
+                exit_code=ExitCode.UNAVAILABLE,
+                retryable=True,
+                suggested_action="retry_session_lease",
+            )
+        if request.error is not None:
+            raise request.error
+
     def _run(self) -> None:
         while True:
             item = self.items.get()
@@ -239,6 +262,10 @@ class _KernelWorker:
                     elif item.kind == "probe":
                         assert item.probe is not None
                         self._run_probe(item.probe)
+                    elif item.kind == "transport_close":
+                        assert item.transport_close is not None
+                        self._drop_transport()
+                        item.transport_close.completed.set()
                     else:
                         raise RuntimeError(f"unknown kernel work kind: {item.kind}")
                 except Exception as error:
@@ -257,6 +284,9 @@ class _KernelWorker:
                     elif item.probe is not None:
                         item.probe.error = error
                         item.probe.completed.set()
+                    elif item.transport_close is not None:
+                        item.transport_close.error = error
+                        item.transport_close.completed.set()
             finally:
                 self.items.task_done()
                 if work_key is not None:
@@ -1121,7 +1151,31 @@ class ExecutionCoordinator:
         self._condition = threading.Condition()
         self._pending = 0
         self._scheduled: set[str] = set()
+        self._leases: dict[tuple[str, str], str] = {}
         self._closed = False
+
+    @staticmethod
+    def _session_key(
+        profile: ProfileSpec,
+        session_name: str,
+    ) -> tuple[str, str]:
+        return profile.profile_id, session_name
+
+    def ensure_session_available(
+        self,
+        profile: ProfileSpec,
+        session_name: str,
+    ) -> None:
+        key = self._session_key(profile, session_name)
+        with self._condition:
+            if key in self._leases:
+                raise api_error(
+                    "SESSION_LEASED",
+                    f"Session '{session_name}' has an exclusive interactive lease",
+                    exit_code=ExitCode.CONFLICT,
+                    retryable=False,
+                    suggested_action="wait_for_interactive_command",
+                )
 
     def _worker(
         self,
@@ -1162,6 +1216,7 @@ class ExecutionCoordinator:
             if record.state is not ExecutionState.QUEUED:
                 return
             session_name = record.session_name
+        self.ensure_session_available(profile, session_name)
         worker = self._worker(profile, session_name, create=True)
         assert worker is not None
         with self._condition:
@@ -1185,6 +1240,7 @@ class ExecutionCoordinator:
             if record.state is not ExecutionState.DISCONNECTED:
                 return
             session_name = record.session_name
+        self.ensure_session_available(profile, session_name)
         worker = self._worker(profile, session_name, create=True)
         assert worker is not None
         with self._condition:
@@ -1208,6 +1264,7 @@ class ExecutionCoordinator:
             if batch.state in {"finished", "error", "interrupted"}:
                 return
             session_name = batch.session_name
+        self.ensure_session_available(profile, session_name)
         worker = self._worker(profile, session_name, create=True)
         assert worker is not None
         key = f"batch:{batch_id}"
@@ -1283,6 +1340,7 @@ class ExecutionCoordinator:
                 retryable=False,
                 suggested_action="use_a_positive_timeout",
             )
+        self.ensure_session_available(profile, session_name)
         with DurableStore(paths=self.paths, profile=profile) as store:
             if store.get_session(session_name) is None:
                 raise api_error(
@@ -1295,6 +1353,78 @@ class ExecutionCoordinator:
         worker = self._worker(profile, session_name, create=True)
         assert worker is not None
         return worker.probe(timeout=float(timeout))
+
+    def acquire_session_lease(
+        self,
+        profile: ProfileSpec,
+        session_name: str,
+    ) -> str:
+        with DurableStore(paths=self.paths, profile=profile) as store:
+            if store.get_session(session_name) is None:
+                raise api_error(
+                    "SESSION_NOT_FOUND",
+                    f"Session not found: {session_name}",
+                    exit_code=ExitCode.NOT_FOUND,
+                    retryable=False,
+                    suggested_action="ensure_session",
+                )
+            if store.session_has_active_work(session_name):
+                raise api_error(
+                    "SESSION_BUSY",
+                    f"Session '{session_name}' has active durable work",
+                    exit_code=ExitCode.CONFLICT,
+                    retryable=False,
+                    suggested_action="wait_for_execution",
+                )
+        key = self._session_key(profile, session_name)
+        lease_id = str(uuid.uuid4())
+        with self._condition:
+            if key in self._leases:
+                raise api_error(
+                    "SESSION_LEASED",
+                    f"Session '{session_name}' is already leased",
+                    exit_code=ExitCode.CONFLICT,
+                    retryable=False,
+                    suggested_action="wait_for_interactive_command",
+                )
+            self._leases[key] = lease_id
+            worker = self._workers.get(key)
+        try:
+            if worker is not None:
+                worker.close_transport()
+        except BaseException:
+            with self._condition:
+                if self._leases.get(key) == lease_id:
+                    del self._leases[key]
+            raise
+        return lease_id
+
+    def release_session_lease(
+        self,
+        profile: ProfileSpec,
+        session_name: str,
+        lease_id: str,
+        *,
+        reconnect: bool,
+    ) -> bool:
+        key = self._session_key(profile, session_name)
+        with self._condition:
+            if self._leases.get(key) != lease_id:
+                raise api_error(
+                    "SESSION_LEASE_MISMATCH",
+                    "Session lease token does not match the active lease",
+                    exit_code=ExitCode.CONFLICT,
+                    retryable=False,
+                    suggested_action="release_the_original_lease",
+                )
+            del self._leases[key]
+        if not reconnect:
+            return False
+        try:
+            self.probe_session(profile, session_name, timeout=10)
+        except Exception:
+            return False
+        return True
 
     def cancel(self, profile: ProfileSpec, execution_id: str):
         with DurableStore(paths=self.paths, profile=profile) as store:
@@ -1326,5 +1456,6 @@ class ExecutionCoordinator:
             self._closed = True
             workers = list(self._workers.values())
             self._workers.clear()
+            self._leases.clear()
         for worker in workers:
             worker.close()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import contextlib
 import os
 import platform
 import signal
@@ -11,6 +12,7 @@ import sys
 import uuid
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any
+from collections.abc import Iterator
 
 from better_colab.capabilities import get_capabilities
 from better_colab.controller_client import ControllerClient
@@ -397,6 +399,29 @@ class BetterColabClient:
             timeout=timeout,
         )
         return SessionHealthResult.model_validate(result)
+
+    @contextlib.contextmanager
+    def session_lease(
+        self,
+        name: str,
+        *,
+        reconnect: bool = True,
+    ) -> Iterator[None]:
+        controller = ControllerClient(paths=self.paths)
+        acquired = controller.acquire_session_lease(
+            profile=self.profile,
+            name=name,
+        )
+        lease_id = acquired["lease_id"]
+        try:
+            yield
+        finally:
+            controller.release_session_lease(
+                profile=self.profile,
+                name=name,
+                lease_id=lease_id,
+                reconnect=reconnect,
+            )
 
     def start_execution(
         self,

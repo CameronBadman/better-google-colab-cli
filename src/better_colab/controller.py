@@ -301,6 +301,10 @@ class ControllerServer:
             return self._session_status(params)
         if method == "session.probe":
             return await self._session_probe(params)
+        if method == "session.lease.acquire":
+            return await self._acquire_session_lease(params)
+        if method == "session.lease.release":
+            return await self._release_session_lease(params)
         if method == "execution.start":
             return self._start_execution(params)
         if method == "execution.batch.start":
@@ -462,6 +466,8 @@ class ControllerServer:
             "provenance": provenance,
             "execution_timeout": timeout,
         }
+        assert self._coordinator is not None
+        self._coordinator.ensure_session_available(profile, session_name)
         with DurableStore(paths=self.paths, profile=profile) as store:
             record = store.create_execution(
                 execution_id=execution_id,
@@ -473,7 +479,6 @@ class ControllerServer:
                 execution_timeout_seconds=timeout,
             )
             result = self._execution_result(store, record, include=[])
-        assert self._coordinator is not None
         self._coordinator.submit(profile, record.execution_id)
         return result
 
@@ -554,6 +559,8 @@ class ControllerServer:
                     },
                 }
             )
+        assert self._coordinator is not None
+        self._coordinator.ensure_session_available(profile, session_name)
         with DurableStore(paths=self.paths, profile=profile) as store:
             batch = store.create_batch_executions(
                 batch_id=batch_id,
@@ -562,7 +569,6 @@ class ControllerServer:
                 continue_on_error=bool(params.get("continue_on_error", False)),
             )
             result = self._batch_result(store, batch)
-        assert self._coordinator is not None
         self._coordinator.submit_batch(profile, batch_id)
         return result
 
@@ -711,6 +717,46 @@ class ControllerServer:
             timeout=timeout_value,
         )
         return result.to_wire()
+
+    async def _acquire_session_lease(
+        self,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        profile = self._profile_from_params(params)
+        name = self._session_name(params)
+        assert self._coordinator is not None
+        lease_id = await asyncio.to_thread(
+            self._coordinator.acquire_session_lease,
+            profile,
+            name,
+        )
+        return {"lease_id": lease_id}
+
+    async def _release_session_lease(
+        self,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        profile = self._profile_from_params(params)
+        name = self._session_name(params)
+        lease_id = params.get("lease_id")
+        if not isinstance(lease_id, str) or not lease_id:
+            raise api_error(
+                "SESSION_LEASE_REQUIRED",
+                "lease_id is required",
+                exit_code=ExitCode.USAGE,
+                retryable=False,
+                suggested_action="release_the_acquired_lease",
+            )
+        reconnect = bool(params.get("reconnect", True))
+        assert self._coordinator is not None
+        reconnected = await asyncio.to_thread(
+            self._coordinator.release_session_lease,
+            profile,
+            name,
+            lease_id,
+            reconnect=reconnect,
+        )
+        return {"released": True, "reconnected": reconnected}
 
     def _execution_status(self, params: dict[str, Any]) -> dict[str, Any]:
         profile = self._profile_from_params(params)

@@ -1066,6 +1066,20 @@ class DurableStore:
                     suggested_action="list_sessions",
                 )
 
+    def session_has_active_work(self, name: str) -> bool:
+        row = self.connection.execute(
+            """
+            SELECT 1 FROM executions
+            WHERE profile_id = ? AND session_name = ?
+              AND state IN (
+                  'created', 'queued', 'dispatching', 'running', 'disconnected'
+              )
+            LIMIT 1
+            """,
+            (self.profile.profile_id, name),
+        ).fetchone()
+        return row is not None
+
     def _atomic_write(self, directory: Path, name: str, data: bytes) -> Path:
         descriptor, temporary = tempfile.mkstemp(
             prefix=f".{name}.",
