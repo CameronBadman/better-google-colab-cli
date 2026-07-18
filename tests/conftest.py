@@ -27,6 +27,10 @@ def mock_common_state(mocker):
     mock_state.store = MagicMock()
     mock_state.client = MagicMock()
     mock_state.history = MagicMock()
+    # Direct command-function tests exercise the optional compatibility
+    # surface unless a root Typer callback explicitly opts into durable
+    # wrappers.
+    mock_state.durable_wrappers = False
 
     # Default behavior for sync_sessions
     mock_state.sync_sessions.return_value = ({}, [])

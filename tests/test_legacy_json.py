@@ -17,7 +17,7 @@ def _payload(result) -> dict:
     return json.loads(result.stdout)
 
 
-def test_flat_sessions_supports_compact_json_on_both_surfaces(mock_common_state):
+def test_compat_sessions_supports_compact_json(mock_common_state):
     assignment = MagicMock()
     assignment.endpoint = "endpoint-1"
     assignment.accelerator.value = "T4"
@@ -30,32 +30,32 @@ def test_flat_sessions_supports_compact_json_on_both_surfaces(mock_common_state)
         [assignment],
     )
 
-    for cli in (better_app, compatibility_app):
-        result = runner.invoke(cli, ["sessions", "--format", "json"])
-        payload = _payload(result)
-        assert result.exit_code == ExitCode.OK
-        assert payload == {
-            "schema_version": 1,
-            "ok": True,
-            "result": {
-                "sessions": [
-                    {
-                        "name": "training",
-                        "endpoint": "endpoint-1",
-                        "hardware": "T4",
-                        "variant": "GPU",
-                    }
-                ]
-            },
-        }
+    result = runner.invoke(compatibility_app, ["sessions", "--format", "json"])
+    payload = _payload(result)
+    assert result.exit_code == ExitCode.OK
+    assert payload == {
+        "schema_version": 1,
+        "ok": True,
+        "result": {
+            "sessions": [
+                {
+                    "name": "training",
+                    "endpoint": "endpoint-1",
+                    "hardware": "T4",
+                    "variant": "GPU",
+                }
+            ]
+        },
+    }
 
 
-def test_flat_status_json_uses_not_found_contract(mock_common_state):
+def test_compat_status_json_uses_not_found_contract(mock_common_state):
     mock_common_state.sync_sessions.return_value = ({}, [])
     mock_common_state.store.get.return_value = None
 
     result = runner.invoke(
-        better_app, ["status", "--session", "missing", "--format=json"]
+        compatibility_app,
+        ["status", "--session", "missing", "--format=json"],
     )
 
     payload = _payload(result)
@@ -64,7 +64,10 @@ def test_flat_status_json_uses_not_found_contract(mock_common_state):
     assert payload["error"]["retryable"] is False
 
 
-def test_flat_new_json_never_prints_progress_or_tokens(mocker, mock_common_state):
+def test_compat_new_json_never_prints_progress_or_tokens(
+    mocker,
+    mock_common_state,
+):
     response = MagicMock()
     response.__class__ = PostAssignmentResponse
     response.runtime_proxy_info.token = "secret-token"
@@ -77,7 +80,7 @@ def test_flat_new_json_never_prints_progress_or_tokens(mocker, mock_common_state
     )
 
     result = runner.invoke(
-        better_app,
+        compatibility_app,
         ["new", "--session", "training", "--gpu", "T4", "--format", "json"],
     )
 
@@ -165,4 +168,3 @@ def test_flat_install_json_suppresses_kernel_terminal_output(
     }
     assert "noisy installer output" not in result.stdout
     assert run_automation.call_args.kwargs["emit_output"] is False
-

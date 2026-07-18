@@ -329,10 +329,11 @@ class BetterColabClient:
                 retryable=False,
                 suggested_action="list_sessions",
             )
-        if session.keep_alive_pid is not None:
-            self._terminate_keep_alive(session.keep_alive_pid)
-        self._control_client().unassign(session.endpoint)
-        self.store.delete_session(name)
+        with self.session_lease(name, reconnect=False):
+            if session.keep_alive_pid is not None:
+                self._terminate_keep_alive(session.keep_alive_pid)
+            self._control_client().unassign(session.endpoint)
+            self.store.delete_session(name)
         return SessionStopResult(name=name, stopped=True)
 
     def _spawn_keep_alive(self, name: str, endpoint: str) -> int:

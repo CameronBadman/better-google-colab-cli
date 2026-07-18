@@ -1,3 +1,4 @@
+import contextlib
 import json
 from types import SimpleNamespace
 
@@ -87,6 +88,11 @@ def test_typed_session_list_and_stop_use_durable_profile(mocker, client):
         store.update_session_keep_alive_pid("training", 987)
     terminate = mocker.patch.object(client, "_terminate_keep_alive")
     control = mocker.patch.object(client, "_control_client").return_value
+    lease = mocker.patch.object(
+        client,
+        "session_lease",
+        return_value=contextlib.nullcontext(),
+    )
 
     listed = client.list_sessions()
     stopped = client.stop_session("training")
@@ -104,6 +110,7 @@ def test_typed_session_list_and_stop_use_durable_profile(mocker, client):
     assert stopped == SessionStopResult(name="training", stopped=True)
     terminate.assert_called_once_with(987)
     control.unassign.assert_called_once_with("endpoint")
+    lease.assert_called_once_with("training", reconnect=False)
     with DurableStore(paths=client.paths, profile=client.profile) as store:
         assert store.get_session("training") is None
 

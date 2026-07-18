@@ -21,13 +21,21 @@ from typing import Any, Dict, Optional
 import typer
 from typing_extensions import Annotated
 
-from better_colab.errors import ExitCode
+from better_colab.durable_commands import _client_from_cli_state
+from better_colab.errors import ExitCode, api_error
 from better_colab.legacy import (
     emit_error as emit_json_error,
     emit_success as emit_json_success,
     resolve_session as resolve_json_session,
     session_result,
     wants_json,
+)
+from better_colab.session_commands import (
+    _format_operation as _format_durable_operation,
+    _render_health as _render_durable_health,
+    _render_list as _render_durable_list,
+    _render_stop as _render_durable_stop,
+    _render_summary as _render_durable_summary,
 )
 from colab_cli.client import (
     Accelerator,
@@ -147,6 +155,20 @@ def new(
 ):
     """Create a new session"""
     from colab_cli.common import state
+
+    if state.durable_wrappers:
+        name = session or uuid.uuid4().hex[:6]
+
+        def operation():
+            with _client_from_cli_state() as client:
+                return client.ensure_session(name, gpu=gpu, tpu=tpu)
+
+        _format_durable_operation(
+            output_format,
+            operation,
+            _render_durable_summary,
+        )
+        return
 
     json_output = wants_json(output_format)
     name = session or uuid.uuid4().hex[:6]
@@ -364,6 +386,18 @@ def sessions_command(
     """List all active sessions"""
     from colab_cli.common import state
 
+    if state.durable_wrappers:
+        def operation():
+            with _client_from_cli_state() as client:
+                return client.list_sessions()
+
+        _format_durable_operation(
+            output_format,
+            operation,
+            _render_durable_list,
+        )
+        return
+
     json_output = wants_json(output_format)
     sessions, assignments = state.sync_sessions(emit_diagnostics=not json_output)
     if not assignments:
@@ -433,6 +467,20 @@ def status(
     """Show session status"""
     from colab_cli.common import state
 
+    if state.durable_wrappers:
+        def operation():
+            with _client_from_cli_state() as client:
+                if session:
+                    return client.session_status(session)
+                return client.list_sessions()
+
+        _format_durable_operation(
+            output_format,
+            operation,
+            _render_durable_health if session else _render_durable_list,
+        )
+        return
+
     json_output = wants_json(output_format)
     if session:
         s = state.store.get(session)
@@ -491,6 +539,19 @@ def stop(
     """Stop a session"""
     from colab_cli.common import state
 
+    if state.durable_wrappers:
+        def operation():
+            with _client_from_cli_state() as client:
+                name = _durable_session_name(client, session)
+                return client.stop_session(name)
+
+        _format_durable_operation(
+            output_format,
+            operation,
+            _render_durable_stop,
+        )
+        return
+
     json_output = wants_json(output_format)
     name = (
         resolve_json_session(state, session)
@@ -531,6 +592,29 @@ def stop(
         emit_json_success({"name": name, "stopped": True})
     else:
         typer.echo("[colab] Session terminated.")
+
+
+def _durable_session_name(client, requested: str | None) -> str:
+    if requested:
+        return requested
+    sessions = client.list_sessions().sessions
+    if len(sessions) == 1:
+        return sessions[0].name
+    if not sessions:
+        raise api_error(
+            "SESSION_NOT_FOUND",
+            "No durable sessions are available",
+            exit_code=ExitCode.NOT_FOUND,
+            retryable=False,
+            suggested_action="ensure_session",
+        )
+    raise api_error(
+        "SESSION_AMBIGUOUS",
+        "Multiple durable sessions are available",
+        exit_code=ExitCode.CONFLICT,
+        retryable=False,
+        suggested_action="specify_session",
+    )
 
 
 def spawn_keep_alive(
