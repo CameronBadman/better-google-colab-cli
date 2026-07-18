@@ -260,6 +260,7 @@ def whoami():
     import urllib.request
 
     from colab_cli.auth import get_credentials
+    from colab_cli.common import state
 
     provider = state.auth_provider
 
@@ -370,7 +371,7 @@ def update_command(
 
     # Skip the install when the current version already matches (or exceeds)
     # the latest known version, to avoid an unnecessary subprocess call.
-    settings = state.settings_store.load()
+    settings = auto_update.state.settings_store.load()
     if settings.latest_version and not auto_update._is_newer(
         settings.latest_version, auto_update.get_app_version()
     ):
