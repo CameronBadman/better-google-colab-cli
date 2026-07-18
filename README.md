@@ -193,6 +193,10 @@ session allocation, idempotent execution, bounded cursor output, guarded
 notebook edits, verified artifacts, and final cleanup. The skill has no
 scripts, Drive workflow, or MCP dependency.
 
+The optional [skill-only Codex plugin](plugins/better-colab) packages those
+same bytes with no MCP server, app, or hooks. Its deterministic release ZIP is
+versioned with the CLI; no marketplace entry is created by default.
+
 ## Documentation
 
 - [Agent-first architecture and public contracts](DESIGN.md)
@@ -211,6 +215,7 @@ scripts, Drive workflow, or MCP dependency.
 - [Guarded notebook documents and durable batches](docs/12_notebooks_and_batches.md)
 - [Compatibility wrappers and exclusive leases](docs/13_compatibility_wrappers.md)
 - [Portable Better Colab skill](docs/14_portable_skill.md)
+- [Skill-only Codex plugin](docs/15_codex_plugin.md)
 
 ## Contributing
 

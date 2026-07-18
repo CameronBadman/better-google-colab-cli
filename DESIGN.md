@@ -5,6 +5,8 @@ schema_version: 1
 last_updated: 2026-07-18
 change_log:
   - date: 2026-07-18
+    summary: Packaged the canonical skill as a strict-semver, skill-only Codex plugin with deterministic archives, CI drift enforcement, and isolated fresh-context install verification.
+  - date: 2026-07-18
     summary: Added the 4 KiB portable vendor-neutral skill, removed the stale bundled operator manual, and forward-tested detached execution, exception recovery, notebook guards, artifacts, and cleanup.
   - date: 2026-07-18
     summary: Routed the core flat session, execution, run, and install workflows through typed durable state and the controller; added exclusive compatibility leases, explicit notebook output copies, and live wrapper verification.
@@ -73,6 +75,25 @@ were removed rather than maintained as a divergent second source. Structural,
 byte-budget, and content-contract tests guard the canonical skill. Fresh-agent
 forward tests drove missing field paths back into the guide, and one live CPU
 integration verifies the resulting workflow end to end.
+
+## Codex plugin
+
+`plugins/better-colab` packages the canonical skill as an optional Codex
+plugin after the JSON and execution schemas stabilized. Its strict-semver
+`0.1.0` manifest declares only `skills: "./skills/"`, Apache-2.0 metadata, and
+shell capability. There is no MCP server, app, hook, or Drive capability.
+
+The deterministic package tool copies the canonical skill metadata and
+licence byte-for-byte, rejects unexpected files, and builds a reproducible ZIP
+with one plugin root. CI checks source equality; tag releases also require the
+plugin version to equal the CLI `v*` tag and publish the plugin archive
+separately from Python distributions.
+
+The official plugin validator accepts both the source tree and extracted ZIP.
+An isolated install smoke test uses a temporary Codex home and temporary
+marketplace fixture, then proves a fresh prompt outside this repository loads
+`better-colab:better-colab` from the installed cache. The fixture is deleted;
+no repository, user, or product marketplace entry is created.
 
 ## Public boundary
 

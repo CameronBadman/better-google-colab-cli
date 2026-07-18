@@ -4,6 +4,8 @@ status: implemented
 last_updated: 2026-07-18
 change_log:
   - date: 2026-07-18
+    summary: Packaged the canonical skill in the Codex plugin and added byte-for-byte CI enforcement.
+  - date: 2026-07-18
     summary: Added and forward-tested the compact vendor-neutral skill, removed the stale bundled operator manual, and verified its complete workflow live on one CPU session.
 ---
 
@@ -59,6 +61,6 @@ traceback retrieval, source-hash-guarded notebook mutation, explicit
 writeback, retained execution history after session release, and empty final
 session listings.
 
-The canonical file is the source copied into the separately packaged plugin.
-CI compares the two copies byte-for-byte so plugin packaging cannot introduce
-a divergent operational manual.
+The canonical file is copied into `plugins/better-colab` by the deterministic
+package tool. CI compares the two copies byte-for-byte so plugin packaging
+cannot introduce a divergent operational manual.

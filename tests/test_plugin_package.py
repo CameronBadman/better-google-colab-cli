@@ -25,6 +25,7 @@ ROOT = Path(__file__).parents[1]
 PLUGIN = ROOT / "plugins" / "better-colab"
 MANIFEST = PLUGIN / ".codex-plugin" / "plugin.json"
 PACKAGER = ROOT / "tools" / "package_plugin.py"
+DESIGN = ROOT / "docs" / "15_codex_plugin.md"
 SEMVER = re.compile(
     r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
     r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
@@ -132,3 +133,14 @@ def test_ci_checks_plugin_copy_and_release_tag_version():
     assert "github.ref_name" in release
     assert "better-colab-plugin-*.zip" in release
     assert not (ROOT / ".agents" / "plugins" / "marketplace.json").exists()
+
+
+def test_plugin_design_records_archive_and_isolated_install_validation():
+    content = DESIGN.read_text()
+
+    assert "last_updated: 2026-07-18" in content
+    assert "plugins/better-colab/.codex-plugin/plugin.json" in content
+    assert "tools/package_plugin.py" in content
+    assert "integration/repro_plugin_install/test.sh" in content
+    assert "temporary marketplace fixture" in content
+    assert "No marketplace entry" in content
