@@ -17,8 +17,8 @@ change_log:
 
 # Local controller and startup election
 
-Better Colab runs one persistent controller per OS user. It owns future
-long-lived kernel transports and serves all configuration/auth profiles over a
+Better Colab runs one persistent controller per OS user. It owns long-lived
+kernel transports and serves all configuration/auth profiles over a
 private Unix-domain socket.
 
 ## Runtime paths and permissions

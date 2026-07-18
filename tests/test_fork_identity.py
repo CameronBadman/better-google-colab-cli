@@ -105,3 +105,12 @@ def test_repository_uses_neutral_ci_and_release_workflows():
     assert not (ROOT / "cloudbuild.yaml").exists()
     assert (ROOT / ".github" / "workflows" / "ci.yml").is_file()
     assert (ROOT / ".github" / "workflows" / "release.yml").is_file()
+
+
+def test_top_level_docs_report_completed_agent_first_interface():
+    design = (ROOT / "DESIGN.md").read_text()
+    readme = (ROOT / "README.md").read_text()
+
+    assert "status: implemented" in design
+    assert "being implemented" not in readme
+    assert "During the controller migration" not in readme

@@ -1,9 +1,11 @@
 ---
 title: Better Colab agent-first architecture
-status: in-progress
+status: implemented
 schema_version: 1
 last_updated: 2026-07-18
 change_log:
+  - date: 2026-07-18
+    summary: Marked the complete eleven-milestone agent-first implementation ready for review after cumulative tests, live verification, artifact validation, and performance targets passed.
   - date: 2026-07-18
     summary: Added a lazy schema-v1 execution-status entry point that reduced measured warm CLI p95 from 360 ms to 126 ms while preserving the typed/controller contract.
   - date: 2026-07-18
@@ -125,7 +127,7 @@ The implemented JSON v1 foundation lives in `better_colab.models`,
 immutable Pydantic values. Their wire form omits optional null/default fields,
 except for the seven session health fields, which are always present.
 `better-colab capabilities` is scoped and cursor-paged; it reports this
-contract and the complete planned durable command vocabulary without embedding
+contract and the complete durable command vocabulary without embedding
 a long manual in an agent skill. `better-colab doctor` is side-effect-free and
 does not initialize logging, authentication, controller state, or a network
 client.

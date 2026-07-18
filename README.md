@@ -21,10 +21,10 @@ attribution, and Git history. New fork-specific code is also Apache-2.0.
 
 ## Status
 
-The agent-first interface is being implemented on the
-`agent-first-interface` branch. Until its schemas stabilize, commands retained
-from upstream should be treated as compatibility behavior rather than the
-durable JSON contract described in [DESIGN.md](DESIGN.md).
+The agent-first interface is implemented on the `agent-first-interface`
+branch. JSON schema v1 and plugin version 0.1.0 are ready for review and
+release. Retained flat commands are compatibility adapters over durable
+behavior where documented in [DESIGN.md](DESIGN.md).
 
 ## Installation
 
@@ -54,9 +54,11 @@ the legacy `drivemount` command. Drive is deliberately absent from
 Provision a CPU runtime, execute code, and release it:
 
 ```bash
-better-colab new -s demo
-printf "print('Hello from Colab')\n" | better-colab exec -s demo
-better-colab stop -s demo
+better-colab session ensure demo --format json
+printf "print('Hello from Colab')\n" | \
+  better-colab execution start --session demo \
+    --idempotency-key readme-demo --format json
+better-colab session stop demo --format json
 ```
 
 Authentication for the CLI control plane is selected globally with
@@ -81,9 +83,9 @@ better-colab capabilities execution.start --format json
 better-colab doctor --format json
 ```
 
-During the controller migration, retained non-interactive session, file, and
-install commands also accept `--format json`. Every JSON response uses schema
-version 1 and is hard-capped at 262,144 bytes.
+Retained non-interactive file commands and compatibility adapters also accept
+`--format json`. Every JSON response uses schema version 1 and is hard-capped
+at 262,144 bytes.
 
 The familiar flat core workflows now share durable state: `new`, `sessions`,
 `status`, and `stop` adapt the typed session API, while `exec`, piped `repl`,
