@@ -1038,6 +1038,34 @@ class DurableStore:
                 (self.profile.profile_id, name),
             )
 
+    def update_session_keep_alive_pid(
+        self,
+        name: str,
+        keep_alive_pid: int | None,
+    ) -> None:
+        with self.transaction() as connection:
+            updated = connection.execute(
+                """
+                UPDATE sessions
+                SET keep_alive_pid = ?, updated_at = ?
+                WHERE profile_id = ? AND name = ?
+                """,
+                (
+                    keep_alive_pid,
+                    self._time(),
+                    self.profile.profile_id,
+                    name,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise api_error(
+                    "SESSION_NOT_FOUND",
+                    f"Session not found: {name}",
+                    exit_code=ExitCode.NOT_FOUND,
+                    retryable=False,
+                    suggested_action="list_sessions",
+                )
+
     def _atomic_write(self, directory: Path, name: str, data: bytes) -> Path:
         descriptor, temporary = tempfile.mkstemp(
             prefix=f".{name}.",

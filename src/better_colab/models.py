@@ -137,6 +137,15 @@ class SessionSummary(PublicModel):
     status: str | None = None
 
 
+class SessionListResult(PublicModel):
+    sessions: list[SessionSummary]
+
+
+class SessionStopResult(PublicModel):
+    name: str
+    stopped: bool
+
+
 class SessionHealthResult(HealthResult):
     name: str
     endpoint: str

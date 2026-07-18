@@ -8,7 +8,12 @@ from typing_extensions import Annotated
 from better_colab.commands import _emit_json_operation
 from better_colab.durable_commands import _client_from_cli_state
 from better_colab.errors import BetterColabError, ExitCode
-from better_colab.models import SessionHealthResult
+from better_colab.models import (
+    SessionHealthResult,
+    SessionListResult,
+    SessionStopResult,
+    SessionSummary,
+)
 
 
 session_app = typer.Typer(
@@ -31,7 +36,22 @@ def _render_health(result: SessionHealthResult) -> None:
         typer.echo(f"Probe error: {result.kernel_probe_error}")
 
 
-def _format_operation(output_format: str, operation) -> None:
+def _render_summary(result: SessionSummary) -> None:
+    typer.echo(
+        f"{result.name} {result.endpoint} {result.hardware} {result.variant}"
+    )
+
+
+def _render_list(result: SessionListResult) -> None:
+    for session in result.sessions:
+        _render_summary(session)
+
+
+def _render_stop(result: SessionStopResult) -> None:
+    typer.echo(f"Stopped {result.name}")
+
+
+def _format_operation(output_format: str, operation, render=_render_health) -> None:
     normalized = output_format.lower()
     if normalized == "json":
         _emit_json_operation(operation)
@@ -44,7 +64,48 @@ def _format_operation(output_format: str, operation) -> None:
     except BetterColabError as error:
         typer.echo(error.error.message, err=True)
         raise typer.Exit(code=int(error.exit_code))
-    _render_health(result)
+    render(result)
+
+
+@session_app.command(name="ensure")
+def ensure_command(
+    name: Annotated[str, typer.Argument(help="Session name")],
+    gpu: Annotated[
+        str | None,
+        typer.Option("--gpu", help="GPU accelerator"),
+    ] = None,
+    tpu: Annotated[
+        str | None,
+        typer.Option("--tpu", help="TPU accelerator"),
+    ] = None,
+    output_format: Annotated[
+        str,
+        typer.Option("--format", help="Output format: text or json"),
+    ] = "text",
+) -> None:
+    """Return an existing named session or explicitly allocate it."""
+
+    def operation() -> SessionSummary:
+        with _client_from_cli_state() as client:
+            return client.ensure_session(name, gpu=gpu, tpu=tpu)
+
+    _format_operation(output_format, operation, _render_summary)
+
+
+@session_app.command(name="list")
+def list_command(
+    output_format: Annotated[
+        str,
+        typer.Option("--format", help="Output format: text or json"),
+    ] = "text",
+) -> None:
+    """List durable sessions in the active profile."""
+
+    def operation() -> SessionListResult:
+        with _client_from_cli_state() as client:
+            return client.list_sessions()
+
+    _format_operation(output_format, operation, _render_list)
 
 
 @session_app.command(name="status")
@@ -83,6 +144,23 @@ def probe_command(
             return client.session_probe(name, timeout=timeout)
 
     _format_operation(output_format, operation)
+
+
+@session_app.command(name="stop")
+def stop_command(
+    name: Annotated[str, typer.Argument(help="Session name")],
+    output_format: Annotated[
+        str,
+        typer.Option("--format", help="Output format: text or json"),
+    ] = "text",
+) -> None:
+    """Unassign one named session."""
+
+    def operation() -> SessionStopResult:
+        with _client_from_cli_state() as client:
+            return client.stop_session(name)
+
+    _format_operation(output_format, operation, _render_stop)
 
 
 def register(app: typer.Typer) -> None:

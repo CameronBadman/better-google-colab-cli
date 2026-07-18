@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import os
 import platform
+import signal
+import subprocess
 import sys
 import uuid
 from importlib.metadata import PackageNotFoundError, version
@@ -30,6 +32,9 @@ from better_colab.models import (
     OutputPage,
     PruneResult,
     SessionHealthResult,
+    SessionListResult,
+    SessionStopResult,
+    SessionSummary,
 )
 from better_colab.notebooks import NotebookDocument
 from better_colab.protocol import (
@@ -158,6 +163,227 @@ class BetterColabClient:
             name=name,
         )
         return SessionHealthResult.model_validate(result)
+
+    def _control_client(self):
+        from colab_cli.auth import AuthProvider, get_credentials
+        from colab_cli.client import Client, Prod
+
+        credentials = get_credentials(
+            str(self.profile.oauth_config_path),
+            provider=AuthProvider(self.profile.auth_provider),
+        )
+        return Client(Prod(), credentials)
+
+    @staticmethod
+    def _hardware_request(
+        *,
+        gpu: str | None,
+        tpu: str | None,
+    ):
+        from colab_cli.client import Accelerator, Variant
+
+        if gpu is not None and tpu is not None:
+            raise api_error(
+                "CONFLICTING_HARDWARE",
+                "gpu and tpu are mutually exclusive",
+                exit_code=ExitCode.USAGE,
+                retryable=False,
+                suggested_action="choose_gpu_or_tpu",
+            )
+        if gpu is not None:
+            accelerators = {
+                "a100": Accelerator.A100,
+                "h100": Accelerator.H100,
+                "l4": Accelerator.L4,
+                "t4": Accelerator.T4,
+                "g4": Accelerator.G4,
+            }
+            accelerator = accelerators.get(gpu.lower())
+            if accelerator is None:
+                raise api_error(
+                    "INVALID_GPU",
+                    f"Unsupported GPU: {gpu}",
+                    exit_code=ExitCode.USAGE,
+                    retryable=False,
+                    suggested_action="choose_a_supported_gpu",
+                )
+            return Variant.GPU, accelerator
+        if tpu is not None:
+            accelerators = {
+                "v5e1": Accelerator.V5E1,
+                "v6e1": Accelerator.V6E1,
+            }
+            accelerator = accelerators.get(tpu.lower())
+            if accelerator is None:
+                raise api_error(
+                    "INVALID_TPU",
+                    f"Unsupported TPU: {tpu}",
+                    exit_code=ExitCode.USAGE,
+                    retryable=False,
+                    suggested_action="choose_a_supported_tpu",
+                )
+            return Variant.TPU, accelerator
+        return Variant.DEFAULT, Accelerator.NONE
+
+    @staticmethod
+    def _session_summary(record, *, status: str | None = None) -> SessionSummary:
+        return SessionSummary(
+            name=record.name,
+            endpoint=record.endpoint,
+            hardware=("CPU" if record.hardware == "NONE" else record.hardware),
+            variant=record.variant,
+            status=status,
+        )
+
+    def ensure_session(
+        self,
+        name: str,
+        *,
+        gpu: str | None = None,
+        tpu: str | None = None,
+    ) -> SessionSummary:
+        if not name:
+            raise api_error(
+                "SESSION_REQUIRED",
+                "Session name must not be empty",
+                exit_code=ExitCode.USAGE,
+                retryable=False,
+                suggested_action="specify_session",
+            )
+        variant, accelerator = self._hardware_request(gpu=gpu, tpu=tpu)
+        existing = self.store.get_session(name)
+        if existing is not None:
+            requested = accelerator.value
+            if (
+                (gpu is not None or tpu is not None)
+                and existing.hardware != requested
+            ):
+                raise api_error(
+                    "SESSION_HARDWARE_CONFLICT",
+                    f"Session '{name}' already uses {existing.hardware}",
+                    exit_code=ExitCode.CONFLICT,
+                    retryable=False,
+                    suggested_action="use_another_session_name",
+                )
+            return self._session_summary(existing, status="ready")
+
+        control = self._control_client()
+        assignment = control.assign(
+            uuid.uuid4(),
+            variant=variant,
+            accelerator=accelerator,
+        )
+        endpoint = str(assignment.endpoint)
+        proxy = getattr(assignment, "runtime_proxy_info", None)
+        backend_url = (
+            str(proxy.url)
+            if proxy is not None
+            else str(getattr(assignment, "runtime_proxy_url", ""))
+        )
+        runtime_token = (
+            str(proxy.token)
+            if proxy is not None
+            else str(getattr(assignment, "runtime_proxy_token", ""))
+        )
+        try:
+            control.keep_alive_assignment(endpoint)
+            self.store.upsert_session(
+                name=name,
+                endpoint=endpoint,
+                backend_url=backend_url,
+                runtime_token=runtime_token,
+                variant=variant.value,
+                hardware=accelerator.value,
+            )
+            pid = self._spawn_keep_alive(name, endpoint)
+            self.store.update_session_keep_alive_pid(name, pid)
+        except BaseException:
+            try:
+                control.unassign(endpoint)
+            except Exception:
+                pass
+            if self.store.get_session(name) is not None:
+                self.store.delete_session(name)
+            raise
+        created = self.store.get_session(name)
+        assert created is not None
+        return self._session_summary(created, status="ready")
+
+    def list_sessions(self) -> SessionListResult:
+        return SessionListResult(
+            sessions=[
+                self._session_summary(session)
+                for session in self.store.list_sessions()
+            ]
+        )
+
+    def stop_session(self, name: str) -> SessionStopResult:
+        session = self.store.get_session(name)
+        if session is None:
+            raise api_error(
+                "SESSION_NOT_FOUND",
+                f"Session not found: {name}",
+                exit_code=ExitCode.NOT_FOUND,
+                retryable=False,
+                suggested_action="list_sessions",
+            )
+        if session.keep_alive_pid is not None:
+            self._terminate_keep_alive(session.keep_alive_pid)
+        self._control_client().unassign(session.endpoint)
+        self.store.delete_session(name)
+        return SessionStopResult(name=name, stopped=True)
+
+    def _spawn_keep_alive(self, name: str, endpoint: str) -> int:
+        self.paths.ensure()
+        log_path = (
+            self.paths.state_dir
+            / f"keep-alive-{self.profile.profile_id[:12]}-{uuid.uuid4().hex}.log"
+        )
+        descriptor = os.open(
+            log_path,
+            os.O_CREAT | os.O_APPEND | os.O_WRONLY,
+            0o600,
+        )
+        log = os.fdopen(descriptor, "ab", buffering=0)
+        command = [
+            sys.executable,
+            "-m",
+            "better_colab.keep_alive",
+            "--state-dir",
+            str(self.paths.state_dir),
+            "--runtime-dir",
+            str(self.paths.runtime_dir),
+            "--config",
+            str(self.profile.config_path),
+            "--auth",
+            self.profile.auth_provider,
+            "--oauth-config",
+            str(self.profile.oauth_config_path),
+            "--session",
+            name,
+            "--endpoint",
+            endpoint,
+        ]
+        try:
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=(sys.platform != "win32"),
+                close_fds=True,
+            )
+        finally:
+            log.close()
+        log_path.chmod(0o600)
+        return process.pid
+
+    @staticmethod
+    def _terminate_keep_alive(pid: int) -> None:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
 
     def session_probe(
         self,
