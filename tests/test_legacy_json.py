@@ -146,7 +146,7 @@ def test_flat_upload_json_maps_missing_local_file_to_not_found(mock_common_state
     assert _payload(result)["error"]["code"] == "LOCAL_FILE_NOT_FOUND"
 
 
-def test_flat_install_json_suppresses_kernel_terminal_output(
+def test_compat_install_json_suppresses_kernel_terminal_output(
     mocker, mock_common_state
 ):
     mock_common_state.resolve_session.return_value = "training"
@@ -156,7 +156,7 @@ def test_flat_install_json_suppresses_kernel_terminal_output(
     )
 
     result = runner.invoke(
-        better_app,
+        compatibility_app,
         ["install", "--session", "training", "numpy", "--format", "json"],
     )
 
