@@ -41,7 +41,6 @@ def create_app(
     *,
     help_text: str,
     include_drive: bool,
-    include_legacy_skill: bool,
     durable_wrappers: bool = False,
 ) -> typer.Typer:
     """Build a CLI surface over the retained upstream command modules.
@@ -139,14 +138,13 @@ def create_app(
     files.register(cli)
     automation.register(cli, include_drive=include_drive)
     run.register(cli)
-    utility.register(cli, include_legacy_skill=include_legacy_skill)
+    utility.register(cli)
     return cli
 
 
 app = create_app(
     help_text="Colab CLI compatibility surface",
     include_drive=True,
-    include_legacy_skill=True,
 )
 
 

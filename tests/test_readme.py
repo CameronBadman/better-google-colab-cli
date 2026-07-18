@@ -46,23 +46,11 @@ def test_readme_from_resources(mock_resources):
     mock_resources.return_value.joinpath.assert_called_with("README.md")
 
 
-def test_skill_from_resources(mock_resources):
-    mock_skill = MagicMock()
-    mock_skill.is_file.return_value = True
-    mock_skill.read_text.return_value = "Fake SKILL content"
+def test_stale_skill_command_is_not_registered():
+    result = runner.invoke(app, ["skill"])
 
-    def joinpath_side_effect(name):
-        if name == "SKILL.md":
-            return mock_skill
-        return MagicMock(is_file=MagicMock(return_value=False))
-
-    mock_resources.return_value.joinpath.side_effect = joinpath_side_effect
-
-    result = runner.invoke(app, ["SKILL"])
-    assert result.exit_code == 0
-    assert result.output.strip() == "Fake SKILL content"
-    mock_resources.assert_called_once_with("colab_cli")
-    mock_resources.return_value.joinpath.assert_called_with("SKILL.md")
+    assert result.exit_code == 2
+    assert "No such command 'skill'" in result.output
 
 
 def test_readme_fallback_to_file(mock_resources):

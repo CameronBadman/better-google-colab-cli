@@ -417,12 +417,7 @@ def readme():
     _print_resource("README.md")
 
 
-def skill():
-    """Print the bundled SKILL.md file"""
-    _print_resource("SKILL.md")
-
-
-def register(app: typer.Typer, *, include_legacy_skill: bool = True):
+def register(app: typer.Typer):
     app.command()(pay)
     app.command()(log)
     app.command(name="url")(url)
@@ -433,6 +428,3 @@ def register(app: typer.Typer, *, include_legacy_skill: bool = True):
     app.command(name="whoami", hidden=True)(whoami)
     app.command(name="readme")(readme)
     app.command(name="README", hidden=True)(readme)
-    if include_legacy_skill:
-        app.command(name="skill")(skill)
-        app.command(name="SKILL", hidden=True)(skill)

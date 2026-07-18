@@ -14,7 +14,6 @@ from colab_cli.cli import create_app
 app = create_app(
     help_text="Better Colab CLI",
     include_drive=False,
-    include_legacy_skill=False,
     durable_wrappers=True,
 )
 commands.register(app)
