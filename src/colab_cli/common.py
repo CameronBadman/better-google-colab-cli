@@ -33,6 +33,7 @@ class State:
         self.config_path = None
         self.logtostderr = False
         self.auth_provider = AuthProvider.OAUTH2
+        self.durable_wrappers = False
         self._client = None
         self._store = None
         self._settings_store = None

@@ -15,6 +15,7 @@ app = create_app(
     help_text="Better Colab CLI",
     include_drive=False,
     include_legacy_skill=False,
+    durable_wrappers=True,
 )
 commands.register(app)
 durable_commands.register(app)

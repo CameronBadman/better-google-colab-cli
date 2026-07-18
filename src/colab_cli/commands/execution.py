@@ -12,11 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import datetime
 import contextlib
+import datetime
 import nbformat
 import os
 import re
+import shutil
 import sys
 import typer
 import uuid
@@ -26,6 +27,12 @@ from typing import Optional
 from typing_extensions import Annotated
 
 from better_colab.compatibility import compatibility_session_lease
+from better_colab.durable_commands import _client_from_cli_state
+from better_colab.models import (
+    BatchState,
+    ExecutionState,
+    OutputPage,
+)
 from colab_cli.runtime import ColabRuntime
 from colab_cli.utils import handle_image, is_terminal_error, render_display_data
 from colab_cli.console import connect_console
@@ -33,6 +40,12 @@ from colab_cli.console import connect_console
 _console = Console()
 
 TITLE_REGEX = re.compile(r"^\s*#\s*@title\s+(.*)", re.MULTILINE)
+FAILED_EXECUTION_STATES = {
+    ExecutionState.ERROR,
+    ExecutionState.INTERRUPTED,
+    ExecutionState.TIMED_OUT,
+    ExecutionState.UNKNOWN,
+}
 
 
 def is_stdin_tty():
@@ -105,6 +118,129 @@ def display_output(out, output_image=None):
         pass
 
 
+def _durable_session_name(client, requested: str | None) -> str:
+    if requested:
+        return requested
+    sessions = client.list_sessions().sessions
+    if len(sessions) == 1:
+        return sessions[0].name
+    if not sessions:
+        typer.echo("[colab] Error: No active sessions found.", err=True)
+    else:
+        typer.echo(
+            "[colab] Error: Multiple active sessions found. Specify one with -s.",
+            err=True,
+        )
+    raise typer.Exit(1)
+
+
+def _render_durable_page(client, page: OutputPage, output_image: str | None) -> None:
+    current = page
+    while True:
+        for event in current.events:
+            if event.text:
+                stream = (
+                    sys.stderr if event.stream == "stderr" else sys.stdout
+                )
+                stream.write(event.text)
+                stream.flush()
+            if event.event_type == "error" and event.traceback:
+                sys.stderr.write("".join(event.traceback) + "\n")
+            if (
+                output_image is not None
+                and event.artifact is not None
+                and event.mime_type in {"image/png", "image/jpeg"}
+            ):
+                shutil.copyfile(event.artifact.path, output_image)
+        if not current.has_more or current.next_cursor is None:
+            return
+        current = client.execution_output(
+            current.execution_id,
+            cursor=current.next_cursor,
+        )
+
+
+def _render_durable_execution(client, result, output_image: str | None) -> None:
+    _render_durable_page(client, result.output, output_image)
+    if result.state in FAILED_EXECUTION_STATES and result.error_name:
+        typer.echo(
+            f"{result.error_name}: {result.error_value or ''}",
+            err=True,
+        )
+
+
+def _durable_source_execution(
+    *,
+    session: str | None,
+    source: str,
+    provenance: dict,
+    timeout: float | None,
+    output_image: str | None,
+) -> None:
+    if not source.strip():
+        return
+    with _client_from_cli_state() as client:
+        name = _durable_session_name(client, session)
+        result = client.start_execution(
+            session=name,
+            source=source,
+            provenance=provenance,
+            execution_timeout=timeout,
+        )
+        _render_durable_execution(client, result, output_image)
+    if result.state in FAILED_EXECUTION_STATES:
+        raise typer.Exit(1)
+
+
+def _durable_notebook_execution(
+    *,
+    session: str | None,
+    path: str,
+    output_image: str | None,
+    write_output: bool,
+) -> None:
+    source_path = os.path.realpath(path)
+    output_path = os.path.splitext(source_path)[0] + "_output.ipynb"
+    execution_path = source_path
+    if write_output:
+        shutil.copyfile(source_path, output_path)
+        execution_path = output_path
+
+    notebook = nbformat.read(execution_path, as_version=4)
+    indexes = [
+        index
+        for index, cell in enumerate(notebook.cells)
+        if cell.cell_type == "code"
+    ]
+    if not indexes:
+        return
+    with _client_from_cli_state() as client:
+        name = _durable_session_name(client, session)
+        batch = client.start_batch(
+            session=name,
+            notebook=execution_path,
+            cell_indexes=indexes,
+            continue_on_error=True,
+        )
+        for execution in batch.executions:
+            page = client.execution_output(execution.execution_id)
+            _render_durable_page(client, page, output_image)
+            if (
+                write_output
+                and execution.state
+                in {ExecutionState.FINISHED, ExecutionState.ERROR}
+                and execution.output_complete
+            ):
+                client.write_notebook_output(execution.execution_id)
+    if write_output:
+        typer.echo(
+            f"[colab] Saved notebook outputs to '{output_path}'.",
+            err=True,
+        )
+    if batch.state in {BatchState.ERROR, BatchState.INTERRUPTED}:
+        raise typer.Exit(1)
+
+
 def exec_command(
     session: Annotated[
         Optional[str], typer.Option("-s", "--session", help="Session name")
@@ -119,9 +255,51 @@ def exec_command(
         Optional[float],
         typer.Option("--timeout", help="Timeout in seconds for code execution"),
     ] = 30.0,
+    write_output: Annotated[
+        bool,
+        typer.Option(
+            "--write-output",
+            help="Write an explicit *_output.ipynb copy",
+        ),
+    ] = False,
 ):
     """Execute code in a session"""
     from colab_cli.common import state
+
+    if state.durable_wrappers:
+        if file and file.endswith(".ipynb"):
+            _durable_notebook_execution(
+                session=session,
+                path=file,
+                output_image=output_image,
+                write_output=write_output,
+            )
+            return
+        if file:
+            with open(file, encoding="utf-8") as source_file:
+                source = source_file.read()
+            provenance = {
+                "kind": "file",
+                "path": os.path.realpath(file),
+            }
+        else:
+            if is_stdin_tty():
+                typer.echo(
+                    "[colab] Error: No input provided. "
+                    "Pipe code or provide a file.",
+                    err=True,
+                )
+                raise typer.Exit(1)
+            source = sys.stdin.read()
+            provenance = {"kind": "stdin"}
+        _durable_source_execution(
+            session=session,
+            source=source,
+            provenance=provenance,
+            timeout=timeout,
+            output_image=output_image,
+        )
+        return
 
     name = state.resolve_session(session)
     s = state.store.get(name)
@@ -236,7 +414,7 @@ def exec_command(
         s.running = None
         state.store.add(s)
         runtime.stop()
-        if file and file.endswith(".ipynb"):
+        if write_output and file and file.endswith(".ipynb"):
             output_file = os.path.splitext(file)[0] + "_output.ipynb"
             typer.echo(f"[colab] Saving notebook with outputs to '{output_file}'...")
             with open(output_file, "w", encoding="utf-8") as f:
@@ -254,13 +432,26 @@ def repl(
     """Start an interactive REPL"""
     from colab_cli.common import state
 
+    interactive = is_stdin_tty()
+    if state.durable_wrappers and not interactive:
+        _durable_source_execution(
+            session=session,
+            source=sys.stdin.read(),
+            provenance={
+                "kind": "stdin",
+                "compatibility_command": "repl",
+            },
+            timeout=None,
+            output_image=output_image,
+        )
+        return
+
     name = state.resolve_session(session)
     s = state.store.get(name)
     if not s:
         typer.echo(f"[colab] Session '{name}' not found.")
         raise typer.Exit(1)
 
-    interactive = is_stdin_tty()
     lease = (
         compatibility_session_lease(name)
         if interactive

@@ -21,7 +21,7 @@ from typer.core import TyperGroup
 from typing_extensions import Annotated
 
 from colab_cli.auth import AuthProvider
-from colab_cli.common import state, setup_logging
+from colab_cli.common import setup_logging
 from colab_cli.commands import session, execution, files, automation, run, utility
 
 
@@ -42,6 +42,7 @@ def create_app(
     help_text: str,
     include_drive: bool,
     include_legacy_skill: bool,
+    durable_wrappers: bool = False,
 ) -> typer.Typer:
     """Build a CLI surface over the retained upstream command modules.
 
@@ -92,10 +93,13 @@ def create_app(
         ] = AuthProvider.OAUTH2,
     ):
         """Configure authentication and local state for this invocation."""
+        from colab_cli.common import state
+
         state.client_oauth_config = client_oauth_config
         state.config_path = config
         state.logtostderr = logtostderr
         state.auth_provider = auth
+        state.durable_wrappers = durable_wrappers
         if ctx.invoked_subcommand not in {
             "capabilities",
             "controller",

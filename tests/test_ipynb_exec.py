@@ -173,7 +173,17 @@ class TestIpynbExec(unittest.TestCase):
         mock_runtime_class,
     ):
         with patch.object(
-            sys, "argv", ["colab", "exec", "-s", "test-s", "-f", self.nb_path]
+            sys,
+            "argv",
+            [
+                "colab",
+                "exec",
+                "-s",
+                "test-s",
+                "-f",
+                self.nb_path,
+                "--write-output",
+            ],
         ):
             mock_store = mock_store_class.return_value
             mock_store.get.return_value = MagicMock(

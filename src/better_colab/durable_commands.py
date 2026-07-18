@@ -20,12 +20,10 @@ execution_app = typer.Typer(
 
 
 def _client_from_cli_state() -> BetterColabClient:
-    # Import the retained CLI module (rather than colab_cli.common.state) so
-    # tests and embedders that patch the common singleton cannot bypass values
-    # already parsed by the root callback.
-    from colab_cli import cli as legacy_cli
+    # Resolve the singleton dynamically so embedders and tests can replace it.
+    # The root callback configures this same object before command dispatch.
+    from colab_cli.common import state
 
-    state = legacy_cli.state
     provider = getattr(state.auth_provider, "value", str(state.auth_provider))
     return BetterColabClient(
         config_path=state.config_path,
