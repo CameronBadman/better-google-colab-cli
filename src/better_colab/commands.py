@@ -99,4 +99,3 @@ def register(app: typer.Typer) -> None:
             typer.echo("format must be 'text' or 'json'", err=True)
             raise typer.Exit(code=int(ExitCode.USAGE))
         _render_doctor(client.doctor())
-

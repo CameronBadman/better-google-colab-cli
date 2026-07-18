@@ -91,4 +91,3 @@ def session_result(session, *, status: str | None = None) -> dict[str, Any]:
     if status is not None:
         result["status"] = status
     return result
-

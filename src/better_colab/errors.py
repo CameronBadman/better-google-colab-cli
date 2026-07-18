@@ -44,4 +44,3 @@ def api_error(
         ),
         exit_code,
     )
-

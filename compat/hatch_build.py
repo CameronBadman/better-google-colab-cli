@@ -11,4 +11,3 @@ class CustomMetadataHook(MetadataHookInterface):
         version = get_version(root="..", relative_to=__file__)
         metadata["version"] = version
         metadata["dependencies"] = [f"better-google-colab-cli=={version}"]
-
