@@ -1,0 +1,4 @@
+interface:
+  display_name: "Better Colab"
+  short_description: "Operate durable Google Colab sessions safely"
+  default_prompt: "Use $better-colab to run this workload safely on a durable Colab session."

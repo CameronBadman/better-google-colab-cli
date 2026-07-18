@@ -1,0 +1,34 @@
+{
+  "name": "better-colab",
+  "version": "0.1.0",
+  "description": "Unofficial, unaffiliated skill for durable Google Colab workflows through better-colab.",
+  "author": {
+    "name": "Cameron Badman",
+    "url": "https://github.com/CameronBadman"
+  },
+  "homepage": "https://github.com/CameronBadman/better-google-colab-cli",
+  "repository": "https://github.com/CameronBadman/better-google-colab-cli",
+  "license": "Apache-2.0",
+  "keywords": [
+    "agent",
+    "colab",
+    "jupyter",
+    "notebook",
+    "cli"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Better Colab",
+    "shortDescription": "Run durable Google Colab workloads safely",
+    "longDescription": "Operate explicit Better Colab sessions, durable executions, bounded output, artifacts, and guarded notebook cells through the shell-only better-colab skill.",
+    "developerName": "Cameron Badman",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Shell"
+    ],
+    "websiteURL": "https://github.com/CameronBadman/better-google-colab-cli",
+    "defaultPrompt": [
+      "Use $better-colab to run this workload safely on a durable Colab session."
+    ]
+  }
+}
