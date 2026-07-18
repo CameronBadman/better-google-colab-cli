@@ -1,42 +1,41 @@
 ---
 name: better-colab
-description: Operate durable Google Colab sessions through the better-colab CLI. Use for remote Python execution, detached jobs, bounded output retrieval, guarded notebook-cell work, artifacts, or session cleanup.
+description: Operate durable Colab sessions via better-colab. Use for remote execution, detached jobs, bounded output, guarded notebook cells, artifacts, or cleanup.
 ---
 
 # Better Colab
 
-Use the shell and the `better-colab` executable. Treat its compact JSON as the
-contract; stdout contains one object and diagnostics use stderr.
+Use the shell and `better-colab`; stdout is one JSON object and
+diagnostics use stderr.
 
 ## Discover and verify
 
-Start every workflow with:
+Start with:
 
 ```sh
 better-colab doctor --format json
 better-colab capabilities --format json
 ```
 
-If syntax is uncertain, scope discovery instead of guessing:
+When syntax is uncertain, scope discovery:
 
 ```sh
 better-colab capabilities execution.start --format json
 ```
 
-Read `ok`, then either `result` or `error.code`, `error.retryable`, and
-`error.suggested_action`. Do not parse human terminal output.
+Read `ok`, then `result` or `error.code`, `retryable`, and `suggested_action`.
 
 ## Allocate explicitly
 
-Choose a stable session name and allocate only through:
+Choose a stable name:
 
 ```sh
 better-colab session ensure NAME --format json
 ```
 
-Add `--gpu GPU` or `--tpu TPU` only when requested. `execution start` never
-allocates a runtime. Use `session status NAME` for stored state and
-`session probe NAME` when live kernel readiness matters.
+Only `session ensure` allocates. Add `--gpu GPU` or `--tpu TPU` only when
+requested. Use `session status NAME` for stored state and `session probe NAME`
+for live kernel readiness.
 
 ## Execute safely
 
@@ -47,79 +46,90 @@ better-colab execution start --session NAME --file PATH \
   --idempotency-key KEY --format json
 ```
 
-Code may instead arrive on stdin. Use a stable, operation-specific key and
-reuse it only with the identical request. A retry with that key returns the
-same execution; changed input produces `IDEMPOTENCY_CONFLICT`.
+Code may arrive on stdin. Retry an identical request with its stable key;
+changed input produces `IDEMPOTENCY_CONFLICT`.
 
-For long work, add `--detach`. Record the returned execution UUID, then:
+For long work, add `--detach`, record `result.execution_id`, then:
 
 ```sh
 better-colab execution wait EXECUTION_ID --timeout 60 \
   --max-bytes 65536 --format json
 ```
 
-A wait with exit 124 is only an observation (`wait_timed_out:true`); it does
-not cancel or alter execution. Attached terminal user-code failure exits 1.
-`execution status` remains observational. Never replay an execution whose
-state is `unknown`; inspect it and report the uncertainty.
+A wait with exit 124 (`wait_timed_out:true`) only observes; repeat without cancelling.
+`finished` succeeds. `error`, `interrupted`, `timed_out`, and `unknown` do not;
+attached start/wait exits 1 on observed failure, while status is observational.
+Never replay `unknown`. For exceptions, retain prior output and inspect:
 
-`wait` includes the first bounded output page. When `has_more` is true, pass
-the returned `next_cursor` unchanged:
+```sh
+better-colab execution status EXECUTION_ID --include traceback --format json
+```
+
+Corrected source is a new request and needs a new key.
+
+`wait` includes its first page at `result.output`: when
+`result.output.has_more` is true, pass `result.output.next_cursor` unchanged.
+Later pages use `result.has_more` and `result.next_cursor`:
 
 ```sh
 better-colab execution output EXECUTION_ID --cursor CURSOR \
   --max-bytes 65536 --format json
 ```
 
-Repeat until `has_more` is false. An artifact event provides a protected path,
-media type, byte size, and `sha256:<hex>`; verify the checksum before consuming
-or moving it. Use `execution cancel EXECUTION_ID` only when cancellation is
-intended.
+Repeat until false; never derive opaque cursors. Find artifacts at
+`result.output.events[].artifact` after wait and `result.events[].artifact`
+later. Paths are local immutable files retained after stop. Match
+`sha256sum PATH` (Linux) or `shasum -a 256 PATH` (macOS) to `sha256:<hex>`
+before reading or copying.
+Use `execution cancel EXECUTION_ID` only when intended.
 
 ## Guard notebook cells
 
-Inspect before mutation:
+Notebook and source paths are local. Inspect before mutation:
 
 ```sh
 better-colab notebook cells NOTEBOOK --format json
 better-colab notebook cell NOTEBOOK --cell-id ID --format json
 ```
 
-Cell IDs are scoped to the notebook path. If IDs are missing, first obtain the
-notebook hash, then run `notebook ids assign` with
-`--expected-notebook-sha256`. Never infer an ID or select a duplicate.
+The list exposes `result.notebook_sha256` and `result.cells[].source_sha256`;
+one cell exposes `result.source_sha256`. IDs are path-scoped; never infer one
+or select a duplicate. For missing IDs:
 
-Execute the inspected source with both its selector and guard:
+```sh
+better-colab notebook ids assign NOTEBOOK \
+  --expected-notebook-sha256 NOTEBOOK_HASH --format json
+```
+
+Execute exactly the inspected cell:
 
 ```sh
 better-colab execution start --session NAME --notebook NOTEBOOK \
-  --cell-id ID --expected-source-sha256 HASH \
+  --cell-id ID --expected-source-sha256 SOURCE_HASH \
   --idempotency-key KEY --format json
 ```
 
-For edits, always send replacement source by `--file PATH` or stdin and keep
-the inspection guard:
+For edits, always preserve the inspected source guard:
 
 ```sh
 better-colab notebook update NOTEBOOK --cell-id ID \
-  --file SOURCE --expected-sha256 HASH --format json
+  --file SOURCE --expected-sha256 SOURCE_HASH --format json
 ```
 
-On a hash conflict, re-inspect instead of overwriting. Output writeback is
-never implicit; use `notebook write-output EXECUTION_ID` only when explicitly
-requested and its guards pass.
+On conflict, re-inspect rather than overwrite. After an edit, re-inspect and
+execute with the new hash. Writeback is never implicit; use `notebook
+write-output EXECUTION_ID` only when explicitly requested for a finished/error
+execution with complete output and unchanged source.
 
 ## Finish and recover
 
-Observe or cancel outstanding work before releasing its runtime:
+Observe or cancel outstanding work before release:
 
 ```sh
 better-colab session stop NAME --format json
 better-colab session list --format json
 ```
 
-Confirm the session is gone. Keep terminal execution records by default;
-`execution prune` is dry-run unless explicitly confirmed. If an error is
-retryable, follow its suggested action and retry the same canonical request
-with the same idempotency key. For unfamiliar recovery paths, query scoped
-capabilities rather than improvising.
+Confirm absence. Keep terminal records/artifacts; `execution prune` is dry-run
+unless confirmed. Follow retryable errors' `suggested_action`, preserving a
+key only for the same request. Query scoped capabilities for recovery.

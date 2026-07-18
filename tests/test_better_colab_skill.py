@@ -50,6 +50,19 @@ def test_portable_skill_teaches_the_agent_first_contract():
         "exit 124",
         "unknown",
         "sha256:",
+        "result.execution_id",
+        "result.output.has_more",
+        "result.output.next_cursor",
+        "result.has_more",
+        "result.next_cursor",
+        "result.notebook_sha256",
+        "result.source_sha256",
+        "result.cells[].source_sha256",
+        "sha256sum PATH",
+        "result.output.events[].artifact",
+        "result.events[].artifact",
+        "Notebook and source paths are local",
+        "complete output",
     )
     for fragment in required_fragments:
         assert fragment in content
