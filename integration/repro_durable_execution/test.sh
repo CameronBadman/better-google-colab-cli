@@ -33,8 +33,10 @@ fi
 BC=(uv run better-colab "${AUTH_FLAGS[@]}" --config "$SESSION_FILE")
 
 cleanup() {
+    "${BC[@]}" stop -s "$SESSION_NAME" --format=json >/dev/null 2>&1 || true
     "${BC[@]}" controller stop --force --format=json >/dev/null 2>&1 || true
     "${BC[@]}" stop -s "$SESSION_NAME" --format=json >/dev/null 2>&1 || true
+    "${BC[@]}" controller stop --force --format=json >/dev/null 2>&1 || true
     rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
@@ -125,8 +127,8 @@ assert "41" in text and "done" in text, result["output"]
 ' <<<"$WAITED"
 
 echo "[*] Cleaning the live assignment and checking for orphans..."
-"${BC[@]}" controller stop --format=json
 "${BC[@]}" stop -s "$SESSION_NAME" --format=json
+"${BC[@]}" controller stop --format=json
 SESSIONS=$("${BC[@]}" sessions --format=json)
 python -c '
 import json, sys

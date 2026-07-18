@@ -36,8 +36,10 @@ fi
 BC=(uv run better-colab "${AUTH_FLAGS[@]}" --config "$SESSION_FILE")
 
 cleanup() {
+    "${BC[@]}" stop -s "$SESSION_NAME" --format=json >/dev/null 2>&1 || true
     "${BC[@]}" controller stop --force --format=json >/dev/null 2>&1 || true
     "${BC[@]}" stop -s "$SESSION_NAME" --format=json >/dev/null 2>&1 || true
+    "${BC[@]}" controller stop --force --format=json >/dev/null 2>&1 || true
     rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
@@ -154,8 +156,8 @@ assert Path(complete[0]["path"]).read_bytes() == expected
 ' "$PAGES_DIR"
 
 echo "[*] Cleaning the live assignment and checking for orphans..."
-"${BC[@]}" controller stop --format=json
 "${BC[@]}" stop -s "$SESSION_NAME" --format=json
+"${BC[@]}" controller stop --format=json
 SESSIONS=$("${BC[@]}" sessions --format=json)
 python -c '
 import json, sys

@@ -37,8 +37,10 @@ BC=(uv run better-colab "${AUTH_FLAGS[@]}" --config "$SESSION_FILE")
 PY=(uv run python)
 
 cleanup() {
+    "${BC[@]}" stop -s "$SESSION_NAME" --format=json >/dev/null 2>&1 || true
     "${BC[@]}" controller stop --force --format=json >/dev/null 2>&1 || true
     "${BC[@]}" stop -s "$SESSION_NAME" --format=json >/dev/null 2>&1 || true
+    "${BC[@]}" controller stop --force --format=json >/dev/null 2>&1 || true
     rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
@@ -296,8 +298,8 @@ assert len(result["assigned"]) == 1, result
 ' <<<"$ASSIGNED"
 
 echo "[*] Cleaning the live assignment and checking for orphans..."
-"${BC[@]}" controller stop --format=json
 "${BC[@]}" stop -s "$SESSION_NAME" --format=json
+"${BC[@]}" controller stop --format=json
 SESSIONS=$("${BC[@]}" sessions --format=json)
 "${PY[@]}" -c '
 import json, sys
