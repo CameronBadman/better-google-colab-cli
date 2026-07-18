@@ -5,6 +5,8 @@ schema_version: 1
 last_updated: 2026-07-18
 change_log:
   - date: 2026-07-18
+    summary: Added a lazy schema-v1 execution-status entry point that reduced measured warm CLI p95 from 360 ms to 126 ms while preserving the typed/controller contract.
+  - date: 2026-07-18
     summary: Packaged the canonical skill as a strict-semver, skill-only Codex plugin with deterministic archives, CI drift enforcement, and isolated fresh-context install verification.
   - date: 2026-07-18
     summary: Added the 4 KiB portable vendor-neutral skill, removed the stale bundled operator manual, and forward-tested detached execution, exception recovery, notebook guards, artifacts, and cleanup.

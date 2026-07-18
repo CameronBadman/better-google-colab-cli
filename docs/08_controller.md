@@ -1,8 +1,10 @@
 ---
 title: Local controller and startup election
 status: implemented
-last_updated: 2026-07-17
+last_updated: 2026-07-18
 change_log:
+  - date: 2026-07-18
+    summary: Added a lazy machine-status entry point and benchmarked cold readiness, warm socket RPCs, warm execution-status CLI latency, and compact response bytes.
   - date: 2026-07-17
     summary: Added parent-batch condition topics and short-lived query-only SQLite metadata snapshots so stale WAL readers cannot poison controller handshakes.
   - date: 2026-07-17
@@ -121,3 +123,23 @@ and race eight clients; every client observes the same newly elected PID.
 - Route same-named sessions in OAuth2 and ADC profiles independently.
 - Refuse normal stop with active work; force and inspect transition journal.
 - Report cold election/readiness and warm RPC p95 without flaky CI thresholds.
+
+The executable uses a lazy machine-status entry point for the exact
+`execution status ... --format=json` observation path. It parses only the
+global profile flags and named expansions needed for that command, then uses
+the same typed client, controller RPC, error mapping, and schema-v1 renderer.
+All other invocations fall through to the complete Typer command graph. The
+public `better_colab` facade also resolves exports lazily, and notebook support
+loads `nbformat` only when a notebook operation is requested.
+
+`integration/repro_controller/test.sh` reports timing without flaky CI
+thresholds. On the 2026-07-18 reference run it measured:
+
+```json
+{"cold_controller_ready_ms":228.141,"warm_rpc_p95_ms":0.358}
+{"warm_execution_status_cli_p95_ms":125.812,"execution_status_response_bytes":377}
+```
+
+These results meet the targets of sub-second cold readiness, warm socket RPC
+p95 below 10 ms, warm status CLI p95 below 150 ms, and status responses below
+2 KiB.

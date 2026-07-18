@@ -8,6 +8,7 @@ from better_colab.entrypoint import _parse_fast_status, _run_fast_status
 
 
 ROOT = Path(__file__).parents[1]
+DESIGN = ROOT / "docs" / "08_controller.md"
 EXECUTION_ID = "00000000-0000-4000-8000-000000000777"
 
 
@@ -160,3 +161,12 @@ def test_fast_status_emits_one_schema_v1_object(capsys):
         "execution_id": EXECUTION_ID,
         "include": ["traceback"],
     }
+
+
+def test_controller_design_records_lazy_status_benchmark():
+    content = DESIGN.read_text()
+
+    assert "last_updated: 2026-07-18" in content
+    assert "lazy machine-status entry point" in content
+    assert "warm_execution_status_cli_p95_ms" in content
+    assert "execution_status_response_bytes" in content
