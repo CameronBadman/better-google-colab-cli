@@ -1,8 +1,10 @@
 ---
 title: Fork identity and packaging
 status: implemented
-last_updated: 2026-07-17
+last_updated: 2026-07-18
 change_log:
+  - date: 2026-07-18
+    summary: Removed the stale bundled operator skill and its compatibility command in favor of one canonical portable skill under .agents.
   - date: 2026-07-17
     summary: Split the Better Colab core executable from the optional upstream compatibility shim.
 ---
@@ -19,9 +21,11 @@ wheel and declares an exact dependency on that version. This prevents a legacy
 entry point from silently targeting a different core implementation.
 
 The Better surface is constructed from the retained command modules without
-registering `drivemount` or the stale upstream skill resource. The compatibility
-surface registers both. Neither surface performs an implicit update request;
-the explicit `update` command remains available.
+registering `drivemount`. The compatibility surface retains that command.
+The stale bundled operator skill and `colab skill` command are removed from
+both distributions; the canonical portable guide lives under `.agents` and
+is packaged separately by the plugin. Neither executable performs an implicit
+update request; the explicit `update` command remains available.
 
 The fork preserves the Apache-2.0 licence, Google copyright headers on upstream
 sources, upstream history, and a repository link back to the original project.
@@ -32,7 +36,7 @@ The README identifies the fork as unofficial and unaffiliated.
 - Parse both project files and assert distribution names and console scripts.
 - Assert the core wheel packages `better_colab` and `colab_cli`.
 - Compare Better and compatibility help output to enforce the Drive boundary.
+- Assert neither executable registers the removed stale skill command.
 - Invoke an ordinary command while spying on update code.
 - Build both wheel/sdist pairs and inspect entry points, versions, and the
   compatibility wheel's exact dependency.
-

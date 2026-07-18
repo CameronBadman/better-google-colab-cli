@@ -183,6 +183,16 @@ better-colab execution batch start \
 Batches stop after the first failed child by default; use
 `--continue-on-error` explicitly when later cells should still run.
 
+## Portable agent skill
+
+The compact, vendor-neutral
+[Better Colab skill](.agents/skills/better-colab/SKILL.md) teaches a generic
+shell-capable agent the safe durable workflow without duplicating the command
+manual. It uses `doctor` and scoped `capabilities` for discovery, explicit
+session allocation, idempotent execution, bounded cursor output, guarded
+notebook edits, verified artifacts, and final cleanup. The skill has no
+scripts, Drive workflow, or MCP dependency.
+
 ## Documentation
 
 - [Agent-first architecture and public contracts](DESIGN.md)
@@ -199,6 +209,8 @@ Batches stop after the first failed child by default; use
 - [Bounded output and artifacts](docs/10_bounded_output.md)
 - [Session health and proof-safe recovery](docs/11_health_and_recovery.md)
 - [Guarded notebook documents and durable batches](docs/12_notebooks_and_batches.md)
+- [Compatibility wrappers and exclusive leases](docs/13_compatibility_wrappers.md)
+- [Portable Better Colab skill](docs/14_portable_skill.md)
 
 ## Contributing
 

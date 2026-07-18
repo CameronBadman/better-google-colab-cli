@@ -18,6 +18,7 @@ from pathlib import Path
 ROOT = Path(__file__).parents[1]
 SKILL = ROOT / ".agents" / "skills" / "better-colab" / "SKILL.md"
 OPENAI_YAML = SKILL.parent / "agents" / "openai.yaml"
+DESIGN = ROOT / "docs" / "14_portable_skill.md"
 
 
 def test_portable_skill_is_compact_and_has_required_metadata():
@@ -93,3 +94,13 @@ def test_stale_bundled_skill_is_removed():
     assert "skills/colab-operator/SKILL.md" not in (
         ROOT / "pyproject.toml"
     ).read_text()
+
+
+def test_portable_skill_design_records_validation_and_forward_testing():
+    content = DESIGN.read_text()
+
+    assert "last_updated: 2026-07-18" in content
+    assert ".agents/skills/better-colab/SKILL.md" in content
+    assert "4,096-byte" in content
+    assert "fresh-agent" in content
+    assert "integration/repro_portable_skill/test.sh" in content

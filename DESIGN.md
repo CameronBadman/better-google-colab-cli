@@ -5,6 +5,8 @@ schema_version: 1
 last_updated: 2026-07-18
 change_log:
   - date: 2026-07-18
+    summary: Added the 4 KiB portable vendor-neutral skill, removed the stale bundled operator manual, and forward-tested detached execution, exception recovery, notebook guards, artifacts, and cleanup.
+  - date: 2026-07-18
     summary: Routed the core flat session, execution, run, and install workflows through typed durable state and the controller; added exclusive compatibility leases, explicit notebook output copies, and live wrapper verification.
   - date: 2026-07-17
     summary: Added path-namespaced notebook inspection and guarded mutation, explicit output writeback, atomic child-per-cell batches, stop/continue/cancel policy, scoped controller metadata snapshots, and live stateful verification.
@@ -50,6 +52,27 @@ evidence. It records the exact Jupyter message ID before sending, dispatches
 once, and requires both the matching `execute_reply` and matching IOPub
 `status: idle`. Disconnects and recovery gaps are represented explicitly
 rather than hidden behind replay or optimistic inference.
+
+## Portable agent skill
+
+`.agents/skills/better-colab/SKILL.md` is the single canonical operational
+guide for shell-capable agents. It stays below 4 KiB, uses no scripts or
+references, and delegates detailed syntax to scoped `capabilities` responses.
+The guide names exact JSON paths only where they remove an otherwise unsafe
+round trip: execution IDs, wait/output cursors, notebook hashes, and artifact
+records.
+
+The skill covers passive preflight, explicit allocation, idempotent attached
+or detached execution, non-mutating wait timeouts, explicit uncertainty,
+bounded output, local artifact verification, guarded notebook mutation,
+explicit output writeback, and cleanup without implicit retention changes.
+It contains no Drive workflow, hidden provider behavior, or MCP dependency.
+
+The old 9.7 KiB `colab-operator` manual and its bundled compatibility command
+were removed rather than maintained as a divergent second source. Structural,
+byte-budget, and content-contract tests guard the canonical skill. Fresh-agent
+forward tests drove missing field paths back into the guide, and one live CPU
+integration verifies the resulting workflow end to end.
 
 ## Public boundary
 
