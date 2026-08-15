@@ -80,9 +80,12 @@ def test_cli_install(mock_state, mock_runtime_class, mock_session):
     assert "numpy" in called_code
 
 
+@patch("colab_cli.commands.automation.get_credentials")
 @patch("colab_cli.commands.automation.ColabRuntime")
 @patch("colab_cli.common.state")
-def test_cli_drivemount(mock_state, mock_runtime_class, mock_session):
+def test_cli_drivemount(
+    mock_state, mock_runtime_class, mock_get_credentials, mock_session
+):
     mock_state.store.get.return_value = mock_session
     mock_state.resolve_session.return_value = "test-session"
 
@@ -98,12 +101,99 @@ def test_cli_drivemount(mock_state, mock_runtime_class, mock_session):
 
     assert "drive.mount('/foo/bar')" in called_code
     assert mock_runtime.colab_request_hook is not None
+    mock_get_credentials.assert_called_once()
     # Drivemount waits for the user to OAuth in their browser; the kernel
     # goes silent during that wait and the default 10s execute() timeout
     # would raise TimeoutError mid-flow. Insist on a generous timeout
     # (>= 5 minutes) being forwarded to runtime.execute_code.
     _, kwargs = mock_runtime.execute_code.call_args
     assert kwargs.get("timeout") is not None and kwargs["timeout"] >= 300
+
+
+@patch("colab_cli.commands.automation.ColabRuntime")
+@patch("colab_cli.common.state")
+def test_auth_does_not_install_drive_hook(mock_state, mock_runtime_class, mock_session):
+    mock_state.store.get.return_value = mock_session
+    mock_state.resolve_session.return_value = "test-session"
+    mock_runtime = mock_runtime_class.return_value
+    mock_runtime.execute_code.return_value = []
+    mock_runtime.colab_request_hook = None
+
+    result = runner.invoke(app, ["auth", "-s", "test-session"])
+
+    assert result.exit_code == 0
+    assert mock_runtime.colab_request_hook is None
+
+
+@patch("colab_cli.common.state")
+def test_run_automation_rejects_missing_session(mock_state):
+    from colab_cli.commands.automation import run_automation
+
+    mock_state.store.get.return_value = None
+    with pytest.raises(ValueError, match="not found"):
+        run_automation("missing", "install", "print(1)")
+
+
+@patch("colab_cli.commands.automation.ColabRuntime")
+@patch("colab_cli.common.state")
+def test_run_automation_stops_runtime_if_final_state_save_fails(
+    mock_state, mock_runtime_class, mock_session
+):
+    from colab_cli.commands.automation import run_automation
+
+    mock_state.store.get.return_value = mock_session
+    mock_state.store.add.side_effect = [None, RuntimeError("state save failed")]
+    mock_runtime = mock_runtime_class.return_value
+    mock_runtime.execute_code.return_value = []
+
+    with pytest.raises(RuntimeError, match="state save failed"):
+        run_automation("test-session", "install", "print(1)")
+
+    mock_runtime.stop.assert_called_once()
+
+
+def test_generated_drivemount_code_uses_one_safe_string_literal():
+    import ast
+    from colab_cli.commands.automation import _build_drivemount_code
+
+    payload = "x'); __import__('os').system('bad') #\n\\tail"
+    tree = ast.parse(_build_drivemount_code(payload))
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+    mount_call = next(
+        node
+        for node in calls
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "mount"
+    )
+    assert len(mount_call.args) == 1
+    assert isinstance(mount_call.args[0], ast.Constant)
+    assert mount_call.args[0].value == payload
+
+
+def test_generated_install_code_uses_safe_list_literal_and_narrow_fallback():
+    import ast
+    from colab_cli.commands.automation import _build_install_code
+
+    payload = "pkg'); __import__('os').system('bad') #\n\\tail"
+    tree = ast.parse(_build_install_code([payload, "normal"])).body
+    install_function = next(node for node in tree if isinstance(node, ast.FunctionDef))
+    assignment = next(
+        node
+        for node in install_function.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "packages"
+            for target in node.targets
+        )
+    )
+    assert ast.literal_eval(assignment.value) == [payload, "normal"]
+
+    handler = next(
+        node
+        for node in ast.walk(install_function)
+        if isinstance(node, ast.ExceptHandler)
+    )
+    caught = {ast.unparse(item) for item in handler.type.elts}
+    assert caught == {"subprocess.CalledProcessError", "OSError"}
 
 
 @patch("colab_cli.commands.automation.ColabRuntime")
