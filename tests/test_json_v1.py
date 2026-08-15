@@ -74,9 +74,7 @@ def test_capabilities_reject_invalid_cursor_and_limit():
 
 
 def test_unknown_capability_is_a_stable_not_found_error():
-    result = runner.invoke(
-        app, ["capabilities", "does-not-exist", "--format", "json"]
-    )
+    result = runner.invoke(app, ["capabilities", "does-not-exist", "--format", "json"])
 
     assert result.exit_code == ExitCode.NOT_FOUND
     assert result.stderr == ""
@@ -152,7 +150,9 @@ def test_health_serialization_keeps_all_seven_fields_even_when_empty():
     }
 
 
-def test_doctor_is_side_effect_free_and_schema_versioned(mocker):
+def test_doctor_is_side_effect_free_and_schema_versioned(mocker, monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
     setup_logging = mocker.patch("colab_cli.cli.setup_logging")
 
     result = runner.invoke(app, ["doctor", "--format", "json"])

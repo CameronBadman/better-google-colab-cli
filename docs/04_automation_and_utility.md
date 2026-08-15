@@ -1,6 +1,7 @@
 ---
 log:
-2026-08-15: Fixed the compatibility runtime's Jupyter stdin handling. Current `jupyter-kernel-client` passes a full `input_request` message to hooks, invokes them synchronously, and ignores return values, so the former prompt-string wrapper collected OAuth codes locally without sending them to the VM. The wrapper now mirrors the installed hook contract, explicitly sends `input_reply`, avoids replying to stale requests, uses `getpass` for password prompts, and records only `<redacted>` in history. Added regression coverage for normal, password, and stale-request paths plus a live interactive check.
+2026-08-15: Hardened the compatibility automation boundary after credential-bearing request metadata, response bodies, Drive authorization URLs, and stdin values were found in local diagnostics. HTTP logs are now metadata-only and query-free behind a rotating private sink with defense-in-depth redaction; Drive propagation uses a bounded, cancellable coordinator with strict response and redirect validation; interactive execution has a real 600-second wall-clock deadline plus best-effort kernel interrupt; generated Drive/install source uses Python literals; and legacy history can be scrubbed idempotently without racing active writers. Canary tests assert secrets are absent from every persisted and rendered sink.
+2026-08-15: Fixed the compatibility runtime's Jupyter stdin handling. Current `jupyter-kernel-client` passes a full `input_request` message to hooks, invokes them synchronously, and ignores return values, so the former prompt-string wrapper collected OAuth codes locally without sending them to the VM. The wrapper now mirrors the installed hook contract, explicitly sends `input_reply`, avoids replying to stale requests, uses `getpass` for password prompts, and records only `<redacted>` in history. Added regression coverage for normal, password, stale-request, EOF, cancellation, and invalid/foreign-message paths.
 2026-07-18: Routed `better-colab install` through durable execution while retaining `colab install` as the direct compatibility path. Package arguments are emitted as safe Python literals; local requirements bytes are embedded in the protected queued source, recreated in a deterministic remote temporary file, and removed after pip/uv finishes. JSON mode suppresses installer output and maps proven execution failure to `INSTALL_FAILED`/exit 1. Also fixed `whoami` to resolve the callback-configured auth state lazily.
 2026-06-11: Replaced the `oauth2` provider's `run_local_server()` (localhost redirect) with a remote copy-paste flow (`_run_remote_flow` in `auth.py`). The CLI now prints an authorization URL built with `redirect_uri=https://sdk.cloud.google.com/applicationdefaultauthcode.html` and `token_usage=remote`, then reads the pasted authorization code via `input()` and exchanges it with `flow.fetch_token(code=...)`. This is the same flow `gcloud auth application-default login` uses and works identically in local and remote/headless/container environments, removing the heuristic of whether to auto-open a browser. Confirmed server-side acceptance with a live GET-only check against the bundled cloud-SDK client (`764086051850-...`); the OOB redirect and a non-bundled client id were both verified to be rejected (`OOB flow has been blocked` / `redirect_uri_mismatch`). Unit tests in `tests/test_auth.py` assert no localhost server is started, the redirect URI + `token_usage=remote` are set, and the pasted code is exchanged.
 2026-06-01: Enabled `colab update --install` self-update on macOS in addition to Linux. Refactored platform check logic to keep the implementation DRY and updated both tests and documentation. Also, on these platforms, an additional message is shown recommending `colab update --install` to upgrade in place, positioned above the standard `pip`/`uv` installation command.
@@ -11,7 +12,7 @@ log:
 2026-05-27: `colab url` now emits BOTH the `?dbu=<urlencoded path>` query parameter (existing) AND a new `#datalabBackendUrl=<full URL>` hash fragment (new). Format: `https://<host>/notebooks/empty.ipynb?dbu=%2Ftun%2Fm%2F<endpoint>#datalabBackendUrl=<host>/tun/m/<endpoint>`. Why both: some Colab frontend code paths consult the hash fragment first and ignore `dbu` entirely, so the previously-emitted query-only form failed silently for those users (the frontend fell through to allocating a fresh VM via `/tun/m/assign`). The fragment value is a FULL URL with scheme + host (NOT just the path) and is emitted RAW (no URL encoding) because browsers don't decode the fragment before passing `location.hash` to page JS — Colab's parser calls `new URL(rawString)` directly. The fragment host always matches `--host` so Colab's same-origin enforcement on embedded backend URLs doesn't block the connection, and sandbox/dev users (`--host https://colab.sandbox.google.com`) get a sandbox fragment automatically. Three new test cases in `tests/test_url.py` cover the raw-encoding requirement (`%3A`/`%2F` must NOT appear in the fragment), the both-signals-present invariant, and `--open` propagating the fragment to `webbrowser.open()`. Integration-verified live against synthetic session state with three host shapes (default, sandbox, trailing-slash); all produced correctly-shaped URLs with no `//` artifacts.
 2026-05-07: Added a developer-only `colab whoami` subcommand (hidden from `colab --help`). Mints an access token via the same `auth.get_credentials(...)` path the rest of the CLI uses (honoring the global `--auth=...` flag), refreshes the credentials, then queries `https://oauth2.googleapis.com/tokeninfo` to print the email, scopes, audience, and expiry of whatever the CLI is about to send. Built specifically to short-circuit the "why is my call to colab.pa.googleapis.com 403-ing" debugging loop — the answer is almost always "missing scope" or "wrong identity", both of which `whoami` makes immediately visible. Hidden via `app.command(hidden=True)`; reachable via `colab whoami` or `colab whoami --help`. Suppressed from the daily-update banner check (added to `_AUTO_UPDATE_SUPPRESSED` in `cli.py`) so the banner doesn't obscure the auth output.
 2026-05-11: Removed the local-file update source (`update_file_path` setting and `_fetch_local` helper); `colab update` now consults PyPI only. Switched the default `update_url` to the canonical PyPI JSON API (`https://pypi.org/pypi/google-colab-cli/json`), which already exposes the `info.version` schema the auto-update subsystem expects. Re-added `colab update --install` as a public self-install path that runs `pip install -U google-colab-cli` against the current `sys.executable`; Linux-only (other platforms exit non-zero with an explanatory message), and a silent no-op when the cached `latest_version` is already at or below the current install.
-2026-05-12: Added an optional `timeout=` parameter to `ColabRuntime.execute_code` that flows through to both the `execute()` and `execute_interactive()` branches. `colab auth` and `colab drivemount` now pass `timeout=600` (10 min) via a shared `INTERACTIVE_AUTOMATION_TIMEOUT_SEC` constant in `commands/automation.py`. Background: `jupyter_kernel_client` defaults to a 10s wall-clock timeout that is consumed even when the kernel is idle waiting on `input_request`. With the drivefs hook intercepting that request and prompting the user to OAuth in their browser, any user that takes >10s to click through (essentially everyone) hit `TimeoutError` and saw "drivemount failed" even though the mount had actually succeeded server-side. The fix is scoped narrowly to the two human-in-the-loop subcommands; non-interactive paths (`colab exec`, `colab run`, `colab install`, `colab repl --pipe`, `colab console --pipe`) keep the upstream default since they receive continuous iopub traffic that resets the practical inactivity ceiling.
+2026-05-12: Added an optional `timeout=` parameter to `ColabRuntime.execute_code` that flows through to both the `execute()` and `execute_interactive()` branches. `colab auth` and `colab drivemount` now pass `timeout=600` (10 min) via a shared `INTERACTIVE_AUTOMATION_TIMEOUT_SEC` constant in `commands/automation.py`. Background: `jupyter_kernel_client` defaults to a 10s timeout that is consumed while the kernel waits on `input_request`. With the drivefs hook prompting the user to OAuth in their browser, users hit `TimeoutError` and saw "drivemount failed" even when the mount later succeeded server-side. Superseded 2026-08-15: `ColabRuntime` now wraps the complete synchronous call in a real wall-clock deadline rather than assuming upstream message activity provides a total bound.
 ---
 
 # Design: Automation and Utility (`auth`, `install`, `log`, `pay`, `version`, `update`, `whoami`)
@@ -44,7 +45,10 @@ backend, selected via the global `--auth=<provider>` flag:
     bundled `oauth_config.json`; reusing it with any other client id yields
     `redirect_uri_mismatch`. If no local config is provided via
     `-c/--client-oauth-config` or found at `~/.colab-cli-oauth-config.json`,
-    it falls back to that bundled `oauth_config.json`.
+    it falls back to that bundled `oauth_config.json`. The cached token and its
+    stable lock file are mode `0600`, leaf symlinks and other unsafe file types
+    fail closed, and refresh/new-token updates use same-directory atomic
+    replacement while holding the write lock.
 2.  **`adc`**: Application Default Credentials via `google.auth.default()`.
     Honors the standard ADC discovery chain
     (`GOOGLE_APPLICATION_CREDENTIALS`, `gcloud auth application-default
@@ -146,16 +150,22 @@ JSON mode emits one schema-v1 result and maps a proven kernel error to
     drive.mount('/content/drive')`
 -   **Handling**: Because `drivefs` enforces the ephemeral side-channel
     propagation (`colab_request` over websocket), the CLI intercepts these
-    messages using `ColabRuntime.colab_request_hook`. When intercepted, the CLI
-    automatically interacts with the Colab backend
-    (`/tun/m/credentials-propagation/`), prompts the user with the Google OAuth
-    consent URL if needed, and dispatches the required `colab_reply` message to
-    the `stdin` channel to unlock the kernel thread.
--   **Timeout**: The kernel is silent (no iopub traffic) the entire time the
-    user is OAuthing in their browser. To avoid the upstream 10s
-    `jupyter_kernel_client` default raising `TimeoutError` mid-flow, this
-    subcommand passes `timeout=INTERACTIVE_AUTOMATION_TIMEOUT_SEC` (600s) to
-    `ColabRuntime.execute_code`. Same applies to `colab auth`.
+    messages using `ColabRuntime.colab_request_hook`. The websocket callback
+    only validates and queues Drive requests; a daemon coordinator performs
+    the bounded HTTP sequence against `/tun/m/credentials-propagation/` so the
+    callback never blocks on network or terminal input. It validates 2xx JSON
+    responses, a 1 MiB parser limit, per-request timeouts, exact Drive auth
+    type, correlated message IDs, and an HTTPS `accounts.google.com/o/oauth2/`
+    consent origin. Duplicate IDs are de-duplicated, queue-drain races are
+    serialized, and every accepted request receives exactly one correlated
+    `colab_reply`, including sanitized failure and cancellation paths.
+-   **Timeout**: `INTERACTIVE_AUTOMATION_TIMEOUT_SEC` is 600 seconds for both
+    `colab auth` and `colab drivemount`. `ColabRuntime` enforces it as a real
+    POSIX wall-clock deadline around the complete synchronous call rather than
+    relying on upstream activity-based socket timeouts. Timeout and Ctrl-C
+    trigger a bounded best-effort remote-kernel interrupt before the original
+    exception is re-raised; finite deadlines fail explicitly off the main
+    thread or on platforms without POSIX interval timers.
 
 ### 4. Logging and Notebook Capture (`colab log`)
 
@@ -166,6 +176,15 @@ JSON mode emits one schema-v1 result and maps a proven kernel error to
 -   **Sensitive input**: Record that an input reply occurred, but persist only
     `<redacted>`. If execution advances while the user is responding, record an
     `input_reply_skipped` event and do not send the stale value.
+-   **HTTP diagnostics**: Persist only method, query-free endpoint, status,
+    reason, and response byte count. Request parameters, headers, response
+    headers, bodies, authorization URLs, cookies, and stdin values are not log
+    inputs. The rotating 5 MiB file sink keeps three mode-`0600` backups and
+    applies credential-pattern redaction as defense in depth.
+-   **Legacy cleanup**: `scrub_legacy_history()` removes known historical
+    response-body fields and redacts old Drive URI/stdin fields using atomic
+    replacement under the same per-session lock as normal appends. Malformed
+    files abort unchanged rather than being partially rewritten.
 -   **Viewing**: `colab log list` and `colab log show <session>`.
 -   **Conversion (Planned)**: Future expansion to convert history logs to
     `.ipynb` or `.html`.
@@ -302,6 +321,10 @@ JSON mode emits one schema-v1 result and maps a proven kernel error to
     to record redacted interaction metadata and proprietary backend requests.
     The stdin hook follows the message-shaped `jupyter_client` contract and
     explicitly transmits replies.
+-   **Generated Source**: User-controlled Drive paths and package arguments are
+    emitted with `repr()` as single Python literals. The installer fallback
+    catches only process/OS launch errors; it does not turn arbitrary program
+    failures into a second execution path.
 
 ## Testing Strategy
 
@@ -325,6 +348,18 @@ TDD is mandatory for all automation features.
     history contains only `<redacted>`.
 -   **Test Case**: Verify password prompts use `getpass`, and obsolete prompt
     replies are skipped when a newer stdin or shell message is already ready.
+-   **Test Case**: Verify EOF, Ctrl-C, invalid/foreign messages, hard wall-clock
+    timeout, and off-main-thread deadline rejection without persisting values.
+-   **Test Case**: Exercise Drive success, consent, malformed/oversized/non-2xx
+    responses, malicious redirects, duplicate IDs, queue-drain concurrency,
+    network timeout, cancellation, and reply failure; every accepted request
+    must unblock exactly once and every error must remain sanitized.
+-   **Test Case**: Seed unique canaries in HTTP query parameters, headers,
+    cookies, response bodies, authorization URLs, prompts, and replies, then
+    assert each canary is absent from log/history files and raised exception
+    text. Rendered output may contain only the intentional user-facing prompt
+    and a validated Google consent URL; submitted replies, transport
+    credentials, cookies, and response bodies must remain absent.
 -   **Test Case**: Verify `colab log` correctly generates an `.ipynb` from a
     populated history file.
 

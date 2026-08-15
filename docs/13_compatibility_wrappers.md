@@ -1,8 +1,10 @@
 ---
 title: Durable compatibility wrappers
 status: implemented
-last_updated: 2026-07-18
+last_updated: 2026-08-15
 change_log:
+  - date: 2026-08-15
+    summary: Hardened retained auth, Drive, runtime, logging, and JSON compatibility state with private atomic storage, bounded coordination, hard deadlines, and secret-negative regression coverage.
   - date: 2026-07-18
     summary: Routed core flat sessions, execution, run, and install through typed durable state; added exclusive leases, explicit notebook output copies, compatibility isolation, and live CPU verification.
 ---
@@ -35,6 +37,12 @@ Session leases prevent the controller and retained direct transports from
 owning the same kernel simultaneously. Acquisition fails while durable work
 is active. Release reconnects and nonce-probes unless the operation is session
 stop, which releases without reconnecting after unassignment.
+
+The retained compatibility surface treats local session JSON, OAuth tokens,
+logs, and history as private data. Managed directories/files use `0700`/`0600`,
+state writes are atomic under stable locks, malformed nonblank state fails
+without reset, HTTP diagnostics exclude credential-bearing payloads, and
+interactive auth/Drive replies are recorded only as redacted metadata.
 
 The deterministic suites cover surface isolation, typed routing, output/error
 exits, script argument and `SystemExit` behavior, requirement embedding, and
