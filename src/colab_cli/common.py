@@ -94,11 +94,7 @@ class State:
             self._sessions = {}
             # We still need to return assignments for 'colab sessions' to work
             # But we only trigger client creation (and thus auth) if we have to.
-            try:
-                assignments = self.client.list_assignments()
-            except SystemExit:
-                # If auth fails, we just return empty assignments
-                assignments = []
+            assignments = self.client.list_assignments()
             return self._sessions, assignments
 
         assignments = self.client.list_assignments()

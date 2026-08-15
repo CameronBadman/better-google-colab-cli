@@ -24,6 +24,7 @@ from colab_cli.client import (
     ColabRequestError,
     PostAssignmentResponse,
 )
+from colab_cli.common import State
 
 runner = CliRunner()
 
@@ -146,6 +147,30 @@ def test_cli_sessions_no_assignments(mock_client, mock_common_state):
     result = runner.invoke(app, ["sessions"])
     assert result.exit_code == 0
     assert "No active sessions found on server." in result.output
+
+
+def test_sync_sessions_does_not_turn_auth_failure_into_empty_success():
+    state = State()
+    state._store = MagicMock()
+    state._store.list.return_value = {}
+    state._client = MagicMock()
+    state._client.list_assignments.side_effect = SystemExit(1)
+
+    with pytest.raises(SystemExit) as raised:
+        state.sync_sessions()
+
+    assert raised.value.code == 1
+
+
+def test_cli_sessions_does_not_render_empty_success_after_auth_failure(
+    mock_common_state,
+):
+    mock_common_state.sync_sessions.side_effect = SystemExit(1)
+
+    result = runner.invoke(app, ["sessions"])
+
+    assert result.exit_code == 1
+    assert "No active sessions found on server." not in result.output
 
 
 def test_cli_status(mock_store, mock_common_state):
