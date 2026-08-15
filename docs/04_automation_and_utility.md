@@ -1,5 +1,6 @@
 ---
 log:
+2026-08-15: Fixed the compatibility runtime's Jupyter stdin handling. Current `jupyter-kernel-client` passes a full `input_request` message to hooks, invokes them synchronously, and ignores return values, so the former prompt-string wrapper collected OAuth codes locally without sending them to the VM. The wrapper now mirrors the installed hook contract, explicitly sends `input_reply`, avoids replying to stale requests, uses `getpass` for password prompts, and records only `<redacted>` in history. Added regression coverage for normal, password, and stale-request paths plus a live interactive check.
 2026-07-18: Routed `better-colab install` through durable execution while retaining `colab install` as the direct compatibility path. Package arguments are emitted as safe Python literals; local requirements bytes are embedded in the protected queued source, recreated in a deterministic remote temporary file, and removed after pip/uv finishes. JSON mode suppresses installer output and maps proven execution failure to `INSTALL_FAILED`/exit 1. Also fixed `whoami` to resolve the callback-configured auth state lazily.
 2026-06-11: Replaced the `oauth2` provider's `run_local_server()` (localhost redirect) with a remote copy-paste flow (`_run_remote_flow` in `auth.py`). The CLI now prints an authorization URL built with `redirect_uri=https://sdk.cloud.google.com/applicationdefaultauthcode.html` and `token_usage=remote`, then reads the pasted authorization code via `input()` and exchanges it with `flow.fetch_token(code=...)`. This is the same flow `gcloud auth application-default login` uses and works identically in local and remote/headless/container environments, removing the heuristic of whether to auto-open a browser. Confirmed server-side acceptance with a live GET-only check against the bundled cloud-SDK client (`764086051850-...`); the OOB redirect and a non-bundled client id were both verified to be rejected (`OOB flow has been blocked` / `redirect_uri_mismatch`). Unit tests in `tests/test_auth.py` assert no localhost server is started, the redirect URI + `token_usage=remote` are set, and the pasted code is exchanged.
 2026-06-01: Enabled `colab update --install` self-update on macOS in addition to Linux. Refactored platform check logic to keep the implementation DRY and updated both tests and documentation. Also, on these platforms, an additional message is shown recommending `colab update --install` to upgrade in place, positioned above the standard `pip`/`uv` installation command.
@@ -112,8 +113,13 @@ remediation guidance) rather than silently after ~1 minute via the daemon.
     google.colab import auth auth.authenticate_user()`
 -   **Handling**: Setting `USE_AUTH_EPHEM` to `'0'` forces the kernel to print a
     standard `gcloud` verification URL and trigger an `input_request` message on
-    the `iopub` channel. The CLI intercepts this via a `stdin_hook` and prompts
-    the user locally, returning the code to unlock the kernel.
+    the `stdin` channel. The CLI's synchronous hook receives the full Jupyter message,
+    prompts locally, and explicitly sends the resulting `input_reply` through
+    the kernel client. Ordinary hook return values are not replies and are
+    ignored by current `jupyter_client`. Before sending, the hook checks for a
+    newer stdin or shell message so a slow user cannot answer an obsolete
+    prompt. Verification codes and other interactive replies are always logged
+    as `<redacted>` rather than plaintext.
 
 ### 2. Package Installation (`colab install`)
 
@@ -157,6 +163,9 @@ JSON mode emits one schema-v1 result and maps a proven kernel error to
 -   **Storage**: Maintain a local JSON-L file of all major operations,
     executions, and stdin interactions in
     `~/.config/colab-cli/history/<session_name>.jsonl`.
+-   **Sensitive input**: Record that an input reply occurred, but persist only
+    `<redacted>`. If execution advances while the user is responding, record an
+    `input_reply_skipped` event and do not send the stale value.
 -   **Viewing**: `colab log list` and `colab log show <session>`.
 -   **Conversion (Planned)**: Future expansion to convert history logs to
     `.ipynb` or `.html`.
@@ -290,7 +299,9 @@ JSON mode emits one schema-v1 result and maps a proven kernel error to
 -   **History Management**: Use `HistoryLogger` class to append structured
     events to session-specific `.jsonl` files.
 -   **Interactive Prompts**: Instrumented `stdin_hook` and `colab_request_hook`
-    to record interactive user input and proprietary backend requests.
+    to record redacted interaction metadata and proprietary backend requests.
+    The stdin hook follows the message-shaped `jupyter_client` contract and
+    explicitly transmits replies.
 
 ## Testing Strategy
 
@@ -310,6 +321,10 @@ TDD is mandatory for all automation features.
 
 -   **Test Case**: Verify all code sent via `exec` is correctly appended to the
     JSON-L history file for that session.
+-   **Test Case**: Verify stdin replies are explicitly sent to the kernel while
+    history contains only `<redacted>`.
+-   **Test Case**: Verify password prompts use `getpass`, and obsolete prompt
+    replies are skipped when a newer stdin or shell message is already ready.
 -   **Test Case**: Verify `colab log` correctly generates an `.ipynb` from a
     populated history file.
 

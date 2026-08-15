@@ -138,25 +138,87 @@ def test_colab_runtime_stop_exception(caplog):
     assert "Error stopping kernel client" in caplog.text
 
 
-def test_colab_runtime_stdin_logging():
+def test_colab_runtime_stdin_reply_is_sent_and_redacted():
     mock_history = MagicMock()
     runtime = ColabRuntime(
         "http://url", "token", session_name="test-s", history=mock_history
     )
     mock_kc = MagicMock()
     runtime._kernel_client = mock_kc
+    mock_kc._manager.client.stdin_channel.msg_ready.return_value = False
+    mock_kc._manager.client.shell_channel.msg_ready.return_value = False
 
-    mock_kc.execute.side_effect = lambda code, allow_stdin=False, stdin_hook=None: {
-        "outputs": [{"text": stdin_hook("Enter something: ")}]
-    }
+    def execute(code, allow_stdin=False, stdin_hook=None):
+        message = {
+            "content": {"prompt": "Enter something: ", "password": False}
+        }
+        stdin_hook(message)
+        return {"outputs": []}
+
+    mock_kc.execute.side_effect = execute
 
     with patch("colab_cli.runtime.input", return_value="user input"):
         outputs = runtime.execute_code("code", allow_stdin=True)
 
-    assert outputs == [{"text": "user input"}]
+    assert outputs == []
+    mock_kc._manager.client.input.assert_called_once_with("user input")
     mock_history.log_event.assert_any_call(
         "test-s", "stdin_request", {"prompt": "Enter something: "}
     )
     mock_history.log_event.assert_any_call(
-        "test-s", "input_reply", {"value": "user input"}
+        "test-s", "input_reply", {"value": "<redacted>"}
+    )
+
+
+def test_colab_runtime_password_reply_uses_getpass_and_is_redacted():
+    mock_history = MagicMock()
+    runtime = ColabRuntime(
+        "http://url", "token", session_name="test-s", history=mock_history
+    )
+    mock_kc = MagicMock()
+    runtime._kernel_client = mock_kc
+    mock_kc._manager.client.stdin_channel.msg_ready.return_value = False
+    mock_kc._manager.client.shell_channel.msg_ready.return_value = False
+
+    def execute(code, allow_stdin=False, stdin_hook=None):
+        stdin_hook({"content": {"prompt": "Secret: ", "password": True}})
+        return {"outputs": []}
+
+    mock_kc.execute.side_effect = execute
+
+    with patch("colab_cli.runtime.getpass.getpass", return_value="secret-value"):
+        runtime.execute_code("code", allow_stdin=True)
+
+    mock_kc._manager.client.input.assert_called_once_with("secret-value")
+    mock_history.log_event.assert_any_call(
+        "test-s", "input_reply", {"value": "<redacted>"}
+    )
+
+
+def test_colab_runtime_skips_stale_stdin_reply():
+    mock_history = MagicMock()
+    runtime = ColabRuntime(
+        "http://url", "token", session_name="test-s", history=mock_history
+    )
+    mock_kc = MagicMock()
+    runtime._kernel_client = mock_kc
+    mock_kc._manager.client.stdin_channel.msg_ready.return_value = True
+    mock_kc._manager.client.shell_channel.msg_ready.return_value = False
+
+    def execute(code, allow_stdin=False, stdin_hook=None):
+        stdin_hook(
+            {"content": {"prompt": "Already obsolete: ", "password": False}}
+        )
+        return {"outputs": []}
+
+    mock_kc.execute.side_effect = execute
+
+    with patch("colab_cli.runtime.input", return_value="do not send"):
+        runtime.execute_code("code", allow_stdin=True)
+
+    mock_kc._manager.client.input.assert_not_called()
+    mock_history.log_event.assert_any_call(
+        "test-s",
+        "input_reply_skipped",
+        {"value": "<redacted>", "reason": "newer_message_ready"},
     )

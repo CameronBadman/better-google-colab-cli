@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import getpass
 import logging
+import sys
 import time
 from typing import Any, Callable, Dict, List, Optional
 
@@ -183,20 +185,63 @@ class ColabRuntime:
         if timeout is not None:
             kwargs["timeout"] = timeout
 
-        # Wrap stdin_hook to log inputs
+        # Preserve jupyter-kernel-client's synchronous stdin-hook contract:
+        # hooks receive the full input_request message and must send input_reply
+        # themselves. The hook's return value is ignored, and async hooks are
+        # not awaited.
         original_stdin_hook = stdin_hook
 
-        def wrapped_stdin_hook(prompt):
+        def wrapped_stdin_hook(message):
+            content = message.get("content", {})
+            prompt_text = str(content.get("prompt", ""))
             if self.history and self.session_name:
                 self.history.log_event(
-                    self.session_name, "stdin_request", {"prompt": prompt}
+                    self.session_name, "stdin_request", {"prompt": prompt_text}
                 )
 
-            res = original_stdin_hook(prompt) if original_stdin_hook else input(prompt)
+            if original_stdin_hook is not None:
+                original_stdin_hook(message)
+                if self.history and self.session_name:
+                    self.history.log_event(
+                        self.session_name,
+                        "input_reply",
+                        {"value": "<redacted>"},
+                    )
+                return
 
+            prompt = getpass.getpass if content.get("password", False) else input
+            try:
+                response = prompt(prompt_text)
+            except EOFError:
+                response = "\x04"
+            except KeyboardInterrupt:
+                sys.stdout.write("\n")
+                return
+
+            client = self.kernel_client._manager.client
+            newer_message_ready = (
+                client.stdin_channel.msg_ready()
+                or client.shell_channel.msg_ready()
+            )
+            if newer_message_ready:
+                if self.history and self.session_name:
+                    self.history.log_event(
+                        self.session_name,
+                        "input_reply_skipped",
+                        {
+                            "value": "<redacted>",
+                            "reason": "newer_message_ready",
+                        },
+                    )
+                return
+
+            client.input(response)
             if self.history and self.session_name:
-                self.history.log_event(self.session_name, "input_reply", {"value": res})
-            return res
+                self.history.log_event(
+                    self.session_name,
+                    "input_reply",
+                    {"value": "<redacted>"},
+                )
 
         if allow_stdin:
             kwargs["stdin_hook"] = wrapped_stdin_hook
