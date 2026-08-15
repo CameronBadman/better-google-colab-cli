@@ -12,14 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import contextlib
 import json
 import os
 from datetime import datetime
-from typing import Dict, Optional, Tuple, Iterator, IO
+from io import StringIO
+from typing import Dict, Optional, Tuple
 
 import filelock
 from pydantic import BaseModel
+
+from colab_cli.private_files import (
+    PrivatePathError,
+    atomic_write_private_text,
+    ensure_private_directory,
+    ensure_private_file,
+    read_private_text,
+)
+
+
+class LocalStateError(RuntimeError):
+    """A local state file is malformed or unsafe to access."""
 
 
 class SessionState(BaseModel):
@@ -45,7 +57,7 @@ class Settings(BaseModel):
 
 
 class _LockedFileStore:
-    def __init__(self, path: str):
+    def __init__(self, path: str, *, managed_directory: bool = False):
         self.path = path
         self.lock_path = "%s.lock" % self.path
         # ReadWriteLock gives us shared (concurrent) readers and exclusive
@@ -55,102 +67,105 @@ class _LockedFileStore:
         # process are merged into a single reentrant lock, whose reentrancy
         # guard then raises RuntimeError when two threads contend for the write
         # lock. We want them to actually serialize via the underlying file lock.
+        try:
+            self._ensure_dir(managed_directory=managed_directory)
+            ensure_private_file(self.path)
+            ensure_private_file(self.lock_path)
+        except PrivatePathError as error:
+            raise LocalStateError(f"unsafe local state path: {self.path}") from error
         self._rwlock = filelock.ReadWriteLock(self.lock_path, is_singleton=False)
-        self._ensure_dir()
 
-    def _ensure_dir(self):
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+    def _ensure_dir(self, *, managed_directory: bool):
+        ensure_private_directory(
+            os.path.dirname(self.path), harden_existing=managed_directory
+        )
 
-    def _write_data(self, f: IO, data: str):
-        f.seek(0)
-        f.truncate()
-        f.write(data)
-        f.flush()
-        os.fsync(f.fileno())
+    def _read_text(self) -> str:
+        try:
+            return read_private_text(self.path)
+        except PrivatePathError as error:
+            raise LocalStateError(f"Unable to read local state: {self.path}") from error
 
-    @contextlib.contextmanager
-    def _lock_shared(self) -> Iterator[Optional[IO]]:
-        if not os.path.exists(self.path):
-            yield None
-            return
+    def _write_text(self, data: str) -> None:
+        try:
+            atomic_write_private_text(self.path, data)
+        except (OSError, PrivatePathError) as error:
+            raise LocalStateError(
+                f"Unable to write local state: {self.path}"
+            ) from error
+
+    def _read_locked(self) -> StringIO:
         with self._rwlock.read_lock():
-            with open(self.path, "r") as f:
-                yield f
+            return StringIO(self._read_text())
 
-    @contextlib.contextmanager
-    def _lock_exclusive(self) -> Iterator[IO]:
-        with self._rwlock.write_lock():
-            with open(self.path, "a+") as f:
-                yield f
+    def _invalid(self, kind: str, error: Exception) -> LocalStateError:
+        return LocalStateError(f"invalid {kind} state in {self.path}")
 
 
 class SettingsStore(_LockedFileStore):
     def __init__(self, path: Optional[str] = None):
+        managed_directory = path is None
         if not path:
             path = os.path.expanduser("~/.config/colab-cli/settings.json")
-        super().__init__(path)
+        super().__init__(path, managed_directory=managed_directory)
 
     def load(self) -> Settings:
-        with self._lock_shared() as f:
-            if f is None:
+        f = self._read_locked()
+        try:
+            content = f.read()
+            if not content or content.isspace():
                 return Settings()
-            try:
-                content = f.read()
-                if not content or content.isspace():
-                    return Settings()
-                data = json.loads(content)
-                return Settings.model_validate(data)
-            except Exception:
-                return Settings()
+            data = json.loads(content)
+            return Settings.model_validate(data)
+        except Exception as error:
+            raise self._invalid("settings", error) from error
 
     def save(self, settings: Settings):
-        with self._lock_exclusive() as f:
-            self._write_data(f, settings.model_dump_json(indent=2))
+        with self._rwlock.write_lock():
+            self._write_text(settings.model_dump_json(indent=2))
 
 
 class StateStore(_LockedFileStore):
     def __init__(self, path: Optional[str] = None):
+        managed_directory = path is None
         if not path:
             path = os.path.expanduser("~/.config/colab-cli/sessions.json")
-        super().__init__(path)
+        super().__init__(path, managed_directory=managed_directory)
 
-    def _load_raw(self, f) -> Dict[str, SessionState]:
-        try:
-            f.seek(0)
-            content = f.read()
-            if not content or content.isspace():
-                return {}
-            data = json.loads(content)
-            return {k: SessionState(**v) for k, v in data.items()}
-        except Exception:
+    def _load_raw(self, f: StringIO) -> Dict[str, SessionState]:
+        content = f.read()
+        if not content or content.isspace():
             return {}
+        try:
+            data = json.loads(content)
+            if not isinstance(data, dict):
+                raise ValueError("session state must be a JSON object")
+            return {k: SessionState(**v) for k, v in data.items()}
+        except Exception as error:
+            raise self._invalid("session", error) from error
 
-    def _save_raw(self, f, sessions: Dict[str, SessionState]):
+    def _save_raw(self, sessions: Dict[str, SessionState]):
         content = json.dumps({k: v.model_dump() for k, v in sessions.items()}, indent=2)
-        self._write_data(f, content)
+        self._write_text(content)
 
     def add(self, state: SessionState):
-        with self._lock_exclusive() as f:
-            sessions = self._load_raw(f)
+        with self._rwlock.write_lock():
+            sessions = self._load_raw(StringIO(self._read_text()))
             sessions[state.name] = state
-            self._save_raw(f, sessions)
+            self._save_raw(sessions)
 
     def get(self, name: str) -> Optional[SessionState]:
-        with self._lock_shared() as f:
-            if f is None:
-                return None
-            sessions = self._load_raw(f)
+        with self._rwlock.read_lock():
+            sessions = self._load_raw(StringIO(self._read_text()))
             return sessions.get(name)
 
     def remove(self, name: str):
-        with self._lock_exclusive() as f:
-            sessions = self._load_raw(f)
+        with self._rwlock.write_lock():
+            sessions = self._load_raw(StringIO(self._read_text()))
             if name in sessions:
                 del sessions[name]
-                self._save_raw(f, sessions)
+                self._save_raw(sessions)
 
     def list(self) -> Dict[str, SessionState]:
-        with self._lock_shared() as f:
-            if f is None:
-                return {}
-            return self._load_raw(f)
+        with self._rwlock.read_lock():
+            return self._load_raw(StringIO(self._read_text()))

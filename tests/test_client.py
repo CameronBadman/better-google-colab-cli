@@ -234,3 +234,57 @@ def test_client_keep_alive_assignment_propagates_http_error(client, mock_session
 
     with pytest.raises(ColabRequestError):
         client.keep_alive_assignment("m-s-test-endpoint")
+
+
+def test_issue_request_logs_metadata_without_credentials(mock_session):
+    canary = "CANARY-secret-value-123"
+    logger = MagicMock()
+    client = Client(Prod(), mock_session, logger=logger)
+    response = MagicMock()
+    response.ok = True
+    response.status_code = 200
+    response.reason = "OK"
+    response.text = json.dumps({"refresh_token": canary})
+    response.content = response.text.encode()
+    response.headers = {"Set-Cookie": canary, "X-Request-Id": "request-1"}
+    response.request.headers = {"Authorization": f"Bearer {canary}"}
+    mock_session.request.return_value = response
+
+    client._issue_request(
+        f"https://colab.research.google.com/test?access_token={canary}",
+        params={"token": canary},
+    )
+
+    rendered = "\n".join(
+        " ".join(str(part) for part in call.args)
+        for call in logger.debug.call_args_list
+    )
+    assert canary not in rendered
+    assert "access_token=" not in rendered
+    assert "Request Headers" not in rendered
+    assert "Response Body" not in rendered
+    assert "GET https://colab.research.google.com/test" in rendered
+    assert "status=200" in rendered
+
+
+def test_request_error_message_uses_query_free_endpoint(mock_session):
+    from colab_cli.client import ColabRequestError
+
+    canary = "CANARY-query-token"
+    response = MagicMock()
+    response.ok = False
+    response.status_code = 403
+    response.reason = "Forbidden"
+    response.text = "sensitive response"
+    response.content = response.text.encode()
+    response.request = MagicMock()
+    mock_session.request.return_value = response
+    client = Client(Prod(), mock_session)
+
+    with pytest.raises(ColabRequestError) as raised:
+        client._issue_request(
+            f"https://colab.research.google.com/test?access_token={canary}"
+        )
+
+    assert canary not in str(raised.value)
+    assert "access_token=" not in str(raised.value)

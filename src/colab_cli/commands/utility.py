@@ -213,9 +213,6 @@ def log(
                     f"type={event.get('error_type')} "
                     f"msg={event.get('error', '')[:120]}"
                 )
-                body = event.get("response_body")
-                if body:
-                    msg += f" body={body[:300]}"
                 typer.echo(msg)
             elif etype == "keep_alive_stopped":
                 msg = (

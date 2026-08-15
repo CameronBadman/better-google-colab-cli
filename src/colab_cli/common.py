@@ -13,10 +13,13 @@
 # limitations under the License.
 
 import logging
+import logging.handlers
 import os
+import re
 import signal
 import sys
 import time
+from pathlib import Path
 from typing import Optional
 
 import typer
@@ -24,6 +27,7 @@ import typer
 from colab_cli.auth import AuthProvider, get_credentials
 from colab_cli.client import Client, Prod
 from colab_cli.history import HistoryLogger
+from colab_cli.private_files import ensure_private_directory, ensure_private_file
 from colab_cli.state import StateStore, SettingsStore
 
 
@@ -165,22 +169,85 @@ def kill_process(pid: int):
         logging.debug(f"Failed to kill process {pid}")
 
 
+class _CredentialRedactionFilter(logging.Filter):
+    _patterns = (
+        re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+"),
+        re.compile(
+            r"(?i)([?&](?:access_token|refresh_token|id_token|token|code|"
+            r"colab-runtime-proxy-token|x-goog-colab-token)=)[^&#\s]+"
+        ),
+        re.compile(
+            r"(?i)((?:authorization|proxy-authorization|cookie|set-cookie|"
+            r"access_token|refresh_token|id_token|client_secret|token|code)"
+            r"\s*[:=]\s*)[^,\s}\]]+"
+        ),
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        rendered = record.getMessage()
+        for pattern in self._patterns:
+            replacement = r"\1<redacted>" if pattern.groups else "<redacted>"
+            rendered = pattern.sub(replacement, rendered)
+        record.msg = rendered
+        record.args = ()
+        return True
+
+
+class _PrivateRotatingFileHandler(logging.handlers.RotatingFileHandler):
+    def _open(self):
+        ensure_private_file(self.baseFilename)
+        return super()._open()
+
+    def doRollover(self):
+        super().doRollover()
+        for index in range(1, self.backupCount + 1):
+            backup = f"{self.baseFilename}.{index}"
+            if os.path.exists(backup):
+                ensure_private_file(backup, create=False)
+
+
 def setup_logging(log_to_stderr: bool):
     log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     logger = logging.getLogger()
-    logger.setLevel(logging.DEBUG)
-
-    requests_log = logging.getLogger("urllib3")
-    requests_log.setLevel(logging.DEBUG)
-    requests_log.propagate = True
+    logger.setLevel(logging.WARNING)
+    logging.getLogger("colab_cli").setLevel(logging.DEBUG)
+    logging.getLogger("better_colab").setLevel(logging.DEBUG)
+    for noisy_logger in ("urllib3", "requests", "websocket", "google.auth"):
+        logging.getLogger(noisy_logger).setLevel(logging.WARNING)
 
     log_dir = os.path.expanduser("~/.config/colab-cli")
-    os.makedirs(log_dir, exist_ok=True)
-    file_handler = logging.FileHandler(os.path.join(log_dir, "colab.log"))
-    file_handler.setFormatter(logging.Formatter(log_format))
-    logger.addHandler(file_handler)
+    ensure_private_directory(log_dir, harden_existing=True)
+    log_path = str(Path(log_dir) / "colab.log")
 
-    if log_to_stderr:
+    file_handler = next(
+        (
+            handler
+            for handler in logger.handlers
+            if getattr(handler, "_colab_cli_handler", False)
+            and getattr(handler, "baseFilename", None) == log_path
+        ),
+        None,
+    )
+    if file_handler is None:
+        file_handler = _PrivateRotatingFileHandler(
+            log_path,
+            maxBytes=5 * 1024 * 1024,
+            backupCount=3,
+            encoding="utf-8",
+        )
+        file_handler._colab_cli_handler = True
+        file_handler.addFilter(_CredentialRedactionFilter())
+        file_handler.setFormatter(logging.Formatter(log_format))
+        logger.addHandler(file_handler)
+
+    has_stream = any(
+        getattr(handler, "_colab_cli_stderr_handler", False)
+        for handler in logger.handlers
+    )
+    if log_to_stderr and not has_stream:
         stream_handler = logging.StreamHandler(sys.stderr)
+        stream_handler._colab_cli_handler = True
+        stream_handler._colab_cli_stderr_handler = True
+        stream_handler.addFilter(_CredentialRedactionFilter())
         stream_handler.setFormatter(logging.Formatter(log_format))
         logger.addHandler(stream_handler)

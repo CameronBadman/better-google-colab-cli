@@ -21,7 +21,13 @@ from datetime import datetime
 
 import filelock
 
-from colab_cli.state import StateStore, SessionState, SettingsStore, Settings
+from colab_cli.state import (
+    LocalStateError,
+    StateStore,
+    SessionState,
+    SettingsStore,
+    Settings,
+)
 
 
 @pytest.fixture
@@ -86,7 +92,74 @@ def test_state_store_invalid_json(temp_config):
         f.write("invalid json")
 
     store = StateStore(temp_config)
-    assert store.list() == {}
+    with pytest.raises(LocalStateError, match="invalid.*state|state.*invalid"):
+        store.list()
+
+    # A read failure must not silently turn into an empty store that a later
+    # write can overwrite.
+    assert open(temp_config, encoding="utf-8").read() == "invalid json"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits")
+def test_state_and_lock_files_are_private_under_permissive_umask(tmp_path):
+    path = tmp_path / "sessions.json"
+    previous = os.umask(0)
+    try:
+        store = StateStore(str(path))
+        store.add(SessionState(name="s", token="t", url="u", endpoint="e"))
+    finally:
+        os.umask(previous)
+
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert (tmp_path / "sessions.json.lock").stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics")
+def test_state_store_rejects_symlink_without_changing_target(tmp_path):
+    target = tmp_path / "target.json"
+    target.write_text('{"sentinel": true}', encoding="utf-8")
+    target.chmod(0o644)
+    link = tmp_path / "sessions.json"
+    link.symlink_to(target)
+
+    with pytest.raises(LocalStateError, match="unsafe|symbolic|symlink"):
+        StateStore(str(link))
+
+    assert target.read_text(encoding="utf-8") == '{"sentinel": true}'
+    assert target.stat().st_mode & 0o777 == 0o644
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX hardlink semantics")
+def test_state_store_rejects_hardlink_without_changing_target(tmp_path):
+    target = tmp_path / "target.json"
+    target.write_text("{}", encoding="utf-8")
+    link = tmp_path / "sessions.json"
+    os.link(target, link)
+
+    with pytest.raises(LocalStateError, match="unsafe|link"):
+        StateStore(str(link))
+
+    assert target.read_text(encoding="utf-8") == "{}"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits")
+def test_default_managed_directory_is_private(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    store = StateStore()
+    store.add(SessionState(name="s", token="t", url="u", endpoint="e"))
+
+    config_dir = tmp_path / ".config" / "colab-cli"
+    assert config_dir.stat().st_mode & 0o777 == 0o700
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits")
+def test_custom_config_does_not_chmod_existing_parent(tmp_path):
+    parent = tmp_path / "shared"
+    parent.mkdir(mode=0o755)
+    parent.chmod(0o755)
+    StateStore(str(parent / "sessions.json"))
+
+    assert parent.stat().st_mode & 0o777 == 0o755
 
 
 def test_state_store_concurrency(temp_config):

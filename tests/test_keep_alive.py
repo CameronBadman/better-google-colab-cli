@@ -395,7 +395,10 @@ def test_keep_alive_logs_error_events_and_last_error(mock_common_state):
     # Two consecutive 4xx errors -> exit, with per-error events + last_error in stop.
     mock_response = MagicMock()
     mock_response.status_code = 404
-    error = ColabRequestError("Not Found", MagicMock(), mock_response)
+    canary = "CANARY-keep-alive-response-body"
+    error = ColabRequestError(
+        "Not Found", MagicMock(), mock_response, response_body=canary
+    )
 
     mock_common_state.store.get.return_value = SessionState(
         name="test", token="t", url="u", endpoint="e1"
@@ -421,3 +424,5 @@ def test_keep_alive_logs_error_events_and_last_error(mock_common_state):
     assert payload["reason"] == "consecutive_4xx_errors"
     assert payload["last_error"]["status_code"] == 404
     assert payload["last_error"]["error_type"] == "ColabRequestError"
+    assert "response_body" not in payload["last_error"]
+    assert canary not in str(log_calls)

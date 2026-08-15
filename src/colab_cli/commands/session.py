@@ -226,9 +226,7 @@ def new(
                 else "SESSION_ALLOCATION_FAILED",
                 "Colab rejected the session allocation request",
                 exit_code=(
-                    ExitCode.AUTH
-                    if status_code in {401, 403}
-                    else ExitCode.UNAVAILABLE
+                    ExitCode.AUTH if status_code in {401, 403} else ExitCode.UNAVAILABLE
                 ),
                 retryable=status_code not in {401, 403},
                 suggested_action=(
@@ -387,6 +385,7 @@ def sessions_command(
     from colab_cli.common import state
 
     if state.durable_wrappers:
+
         def operation():
             with _client_from_cli_state() as client:
                 return client.list_sessions()
@@ -468,6 +467,7 @@ def status(
     from colab_cli.common import state
 
     if state.durable_wrappers:
+
         def operation():
             with _client_from_cli_state() as client:
                 if session:
@@ -540,6 +540,7 @@ def stop(
     from colab_cli.common import state
 
     if state.durable_wrappers:
+
         def operation():
             with _client_from_cli_state() as client:
                 name = _durable_session_name(client, session)
@@ -699,12 +700,10 @@ def keep_alive(
             last_error = None
         except Exception as e:
             code = get_status_code(e)
-            response_body = getattr(e, "response_body", None)
             err_info = {
                 "status_code": code,
                 "error_type": type(e).__name__,
                 "error": str(e)[:500],
-                "response_body": (str(response_body)[:1000] if response_body else None),
             }
             last_error = err_info
             state.history.log_event(

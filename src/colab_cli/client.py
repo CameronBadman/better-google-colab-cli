@@ -18,7 +18,7 @@ from enum import Enum
 import json
 import logging
 from typing import Dict, List, Optional, Union
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 import uuid
 
 from colab_cli.utils import get_status_code
@@ -181,20 +181,29 @@ class Client:
             "value"
         ]
 
-        self.logger.debug(f"Request: {method} {endpoint}")
-        self.logger.debug(f"Params: {params}")
+        parsed_log_url = urlsplit(endpoint)
+        safe_endpoint = urlunsplit(
+            (parsed_log_url.scheme, parsed_log_url.netloc, parsed_log_url.path, "", "")
+        )
+        self.logger.debug(f"Request: {method} {safe_endpoint}")
 
         response = self.session.request(
             method, endpoint, headers=request_headers, params=params, **kwargs
         )
 
-        self.logger.debug(f"Request Headers: {response.request.headers}")
-        self.logger.debug(f"Response: {response.status_code} {response.reason}")
-        self.logger.debug(f"Response Headers: {response.headers}")
-        self.logger.debug(f"Response Body: {response.text}")
+        response_content = getattr(response, "content", None)
+        response_size = (
+            len(response_content)
+            if isinstance(response_content, bytes)
+            else len((response.text or "").encode("utf-8"))
+        )
+        self.logger.debug(
+            f"Response: status={response.status_code} "
+            f"reason={response.reason} bytes={response_size}"
+        )
         if not response.ok:
             raise ColabRequestError(
-                f"Failed to issue request {method} {endpoint}: {response.reason}",
+                f"Failed to issue request {method} {safe_endpoint}: {response.reason}",
                 request=response.request,
                 response=response,
                 response_body=response.text,

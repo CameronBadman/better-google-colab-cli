@@ -17,15 +17,24 @@ import json
 import logging
 from importlib import resources
 import os
+from pathlib import Path
 import warnings
 from typing import Optional
 
+import filelock
 import google.auth
 import typer
 from google.auth.transport import requests
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
+
+from colab_cli.private_files import (
+    PrivatePathError,
+    atomic_write_private_text,
+    ensure_private_directory,
+    ensure_private_file,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -94,59 +103,87 @@ def _run_remote_flow(client_config: dict) -> Credentials:
     return flow.credentials
 
 
-def _get_google_auth_credentials(config_path: str) -> Credentials:
-    """
-    Retrieves credentials using standard public OAuth2 flow.
-    """
-    client_config = None
+def _load_client_config(config_path: str) -> dict:
     if os.path.exists(config_path):
         with open(config_path, "r") as f:
-            client_config = json.load(f)
+            return json.load(f)
     else:
-        # Last resort: try inlined config
         try:
             config_resource = resources.files("colab_cli").joinpath("oauth_config.json")
             if config_resource.is_file():
-                client_config = json.loads(config_resource.read_text())
+                return json.loads(config_resource.read_text())
         except Exception as e:
             logger.debug(f"Failed to load inlined config: {e}")
 
-    if not client_config:
-        raise FileNotFoundError(
-            f"Client OAuth config not found at {config_path} and no inlined config available. "
-            "Please provide a valid path via -c/--client-oauth-config."
-        )
+    raise FileNotFoundError(
+        f"Client OAuth config not found at {config_path} and no inlined config available. "
+        "Please provide a valid path via -c/--client-oauth-config."
+    )
 
-    creds = None
 
-    # Ensure config directory exists for the token file
-    os.makedirs(os.path.dirname(TOKEN_CONFIG_PATH), exist_ok=True)
+def _prepare_token_storage() -> filelock.ReadWriteLock:
+    token_path = Path(TOKEN_CONFIG_PATH).expanduser()
+    managed_parent = token_path.parent == Path(
+        os.path.expanduser("~/.config/colab-cli")
+    )
+    try:
+        ensure_private_directory(token_path.parent, harden_existing=managed_parent)
+        ensure_private_file(f"{token_path}.lock")
+    except PrivatePathError as error:
+        raise RuntimeError(f"unsafe OAuth token cache path: {token_path}") from error
+    return filelock.ReadWriteLock(f"{token_path}.lock", is_singleton=False)
 
+
+def _load_cached_credentials() -> Optional[Credentials]:
     if os.path.exists(TOKEN_CONFIG_PATH):
         try:
-            creds = Credentials.from_authorized_user_file(
+            ensure_private_file(TOKEN_CONFIG_PATH, create=False)
+            return Credentials.from_authorized_user_file(
                 TOKEN_CONFIG_PATH, PUBLIC_SCOPES
             )
+        except PrivatePathError as error:
+            raise RuntimeError(
+                f"unsafe OAuth token cache path: {TOKEN_CONFIG_PATH}"
+            ) from error
         except Exception as e:
             logger.warning(f"Failed to load token from {TOKEN_CONFIG_PATH}: {e}")
+    return None
 
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            try:
-                creds.refresh(Request())
-            except Exception as e:
-                logger.warning(f"Failed to refresh token: {e}")
-                creds = None
+
+def _refresh_credentials(creds: Optional[Credentials]) -> Optional[Credentials]:
+    if not creds or creds.valid:
+        return creds
+    if creds.expired and creds.refresh_token:
+        try:
+            creds.refresh(Request())
+            return creds
+        except Exception as e:
+            logger.warning(f"Failed to refresh token: {e}")
+    return None
+
+
+def _save_credentials(creds: Credentials) -> None:
+    try:
+        atomic_write_private_text(TOKEN_CONFIG_PATH, creds.to_json())
+    except PrivatePathError as error:
+        raise RuntimeError(
+            f"unsafe OAuth token cache path: {TOKEN_CONFIG_PATH}"
+        ) from error
+    except Exception as e:
+        logger.error(f"Failed to save token to {TOKEN_CONFIG_PATH}: {e}")
+
+
+def _get_google_auth_credentials(config_path: str) -> Credentials:
+    """Retrieve public OAuth credentials with a private, serialized cache."""
+
+    client_config = _load_client_config(config_path)
+    lock = _prepare_token_storage()
+    with lock.write_lock():
+        creds = _refresh_credentials(_load_cached_credentials())
 
         if not creds:
             creds = _run_remote_flow(client_config)
-
-        # Save the credentials for the next run
-        try:
-            with open(TOKEN_CONFIG_PATH, "w") as token_file:
-                token_file.write(creds.to_json())
-        except Exception as e:
-            logger.error(f"Failed to save token to {TOKEN_CONFIG_PATH}: {e}")
+        _save_credentials(creds)
 
     return creds
 
