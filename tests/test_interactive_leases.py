@@ -45,8 +45,8 @@ def test_tty_repl_and_console_hold_exclusive_session_lease(
     assert repl.exit_code == 0
     assert console.exit_code == 0
     assert lease.call_args_list == [
-        mocker.call("training"),
-        mocker.call("training"),
+        mocker.call("training", endpoint="endpoint"),
+        mocker.call("training", endpoint="endpoint"),
     ]
 
 
@@ -54,7 +54,9 @@ def test_vm_auth_and_drive_mount_hold_exclusive_session_lease(
     mocker,
     mock_common_state,
 ):
+    session = _session()
     mock_common_state.resolve_session.return_value = "training"
+    mock_common_state.store.get.return_value = session
     lease = mocker.patch(
         "colab_cli.commands.automation.compatibility_session_lease",
         side_effect=lambda *_args, **_kwargs: contextlib.nullcontext(),
@@ -70,7 +72,7 @@ def test_vm_auth_and_drive_mount_hold_exclusive_session_lease(
     assert auth.exit_code == 0
     assert drive.exit_code == 0
     assert lease.call_args_list == [
-        mocker.call("training"),
-        mocker.call("training"),
+        mocker.call("training", endpoint="endpoint"),
+        mocker.call("training", endpoint="endpoint"),
     ]
     assert automation.call_count == 2

@@ -1,8 +1,10 @@
 ---
 title: Durable compatibility wrappers
 status: implemented
-last_updated: 2026-08-15
+last_updated: 2026-08-18
 change_log:
+  - date: 2026-08-18
+    summary: Made retained interactive leases conditional on matching controller endpoint ownership, allowing legacy-only sessions to proceed while still protecting shared kernels.
   - date: 2026-08-15
     summary: Hardened retained auth, Drive, runtime, logging, and JSON compatibility state with private atomic storage, bounded coordination, hard deadlines, and secret-negative regression coverage.
   - date: 2026-07-18
@@ -34,9 +36,15 @@ targets an explicit `*_output.ipynb` copy. Missing IDs are not silently added
 to the source notebook.
 
 Session leases prevent the controller and retained direct transports from
-owning the same kernel simultaneously. Acquisition fails while durable work
-is active. Release reconnects and nonce-probes unless the operation is session
-stop, which releases without reconnecting after unassignment.
+owning the same kernel simultaneously. Before a retained interactive command
+runs, its legacy session endpoint is compared with the durable sessions in the
+same profile. A matching controller-owned endpoint is leased under its durable
+name; a legacy-only endpoint proceeds without a controller lease because there
+is no controller owner to release. This endpoint comparison also prevents a
+stale same-name record for a different runtime from blocking the command.
+Acquisition fails while durable work is active. Release reconnects and
+nonce-probes unless the operation is session stop, which releases without
+reconnecting after unassignment.
 
 The retained compatibility surface treats local session JSON, OAuth tokens,
 logs, and history as private data. Managed directories/files use `0700`/`0600`,
@@ -45,8 +53,9 @@ without reset, HTTP diagnostics exclude credential-bearing payloads, and
 interactive auth/Drive replies are recorded only as redacted metadata.
 
 The deterministic suites cover surface isolation, typed routing, output/error
-exits, script argument and `SystemExit` behavior, requirement embedding, and
-lease cleanup. `integration/repro_compatibility_wrappers/test.sh` reuses one
+exits, script argument and `SystemExit` behavior, requirement embedding,
+legacy-only lease bypass, endpoint-matched lease ownership, and lease cleanup.
+`integration/repro_compatibility_wrappers/test.sh` reuses one
 live CPU assignment across flat session creation, piped REPL, exec success and
 failure, `run --keep`, install, status, and stop. It finishes by checking both
 durable local state and the Colab assignments endpoint for zero sessions.

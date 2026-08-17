@@ -468,7 +468,7 @@ def repl(
         raise typer.Exit(1)
 
     lease = (
-        compatibility_session_lease(name)
+        compatibility_session_lease(name, endpoint=s.endpoint)
         if interactive
         else contextlib.nullcontext()
     )
@@ -564,7 +564,7 @@ def console(
     if not s:
         typer.echo(f"[colab] Session '{name}' not found.")
         raise typer.Exit(1)
-    with compatibility_session_lease(name):
+    with compatibility_session_lease(name, endpoint=s.endpoint):
         state.history.log_event(s.name, "console_started", {})
         s.running = "console"
         state.store.add(s)

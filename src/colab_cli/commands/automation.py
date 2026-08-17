@@ -220,9 +220,13 @@ def auth(
     from colab_cli.common import state
 
     name = state.resolve_session(session)
+    legacy_session = state.store.get(name)
     code = "import os\nos.environ['USE_AUTH_EPHEM'] = '0'\nfrom google.colab import auth\nauth.authenticate_user()"
     typer.echo(f"[colab] Starting Google Auth flow on {name}...")
-    with compatibility_session_lease(name):
+    with compatibility_session_lease(
+        name,
+        endpoint=getattr(legacy_session, "endpoint", None),
+    ):
         run_automation(
             name,
             "auth",
@@ -242,9 +246,13 @@ def drivemount(
     from colab_cli.common import state
 
     name = state.resolve_session(session)
+    legacy_session = state.store.get(name)
     code = _build_drivemount_code(path)
     typer.echo(f"[colab] Mounting Google Drive to '{path}' on {name}...")
-    with compatibility_session_lease(name):
+    with compatibility_session_lease(
+        name,
+        endpoint=getattr(legacy_session, "endpoint", None),
+    ):
         run_automation(
             name,
             "drivemount",
