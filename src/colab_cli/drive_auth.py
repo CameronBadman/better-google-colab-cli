@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import queue
-import selectors
 import threading
 import time
 from dataclasses import dataclass
@@ -14,6 +13,7 @@ from urllib.parse import urlsplit
 
 MAX_RESPONSE_BYTES = 1024 * 1024
 HTTP_TIMEOUT_SEC = 30.0
+CONSENT_POLL_INTERVAL_SEC = 2.0
 REDACTED = "<redacted>"
 
 
@@ -36,31 +36,12 @@ class DriveAuthError(RuntimeError):
 class _DriveRequest:
     message: dict[str, Any]
     wsclient: Any
-    message_id: str
+    message_id: str | int
 
 
-def _wait_for_consent(timeout: float, cancelled: threading.Event) -> None:
-    try:
-        terminal = open("/dev/tty", encoding="utf-8")
-    except OSError as error:
-        raise DriveAuthError("consent_terminal_unavailable") from error
-    with terminal:
-        selector = selectors.DefaultSelector()
-        selector.register(terminal, selectors.EVENT_READ)
-        try:
-            deadline = time.monotonic() + timeout
-            while True:
-                if cancelled.is_set():
-                    raise DriveAuthError("cancelled", phase="consent")
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise DriveAuthError("deadline_exceeded", phase="consent")
-                if selector.select(timeout=min(0.1, remaining)):
-                    if terminal.readline() == "":
-                        raise DriveAuthError("consent_eof", phase="consent")
-                    return
-        finally:
-            selector.close()
+def _wait_for_consent_poll(timeout: float, cancelled: threading.Event) -> None:
+    if cancelled.wait(timeout):
+        raise DriveAuthError("cancelled", phase="consent")
 
 
 class DriveAuthCoordinator:
@@ -74,7 +55,9 @@ class DriveAuthCoordinator:
         history: Any,
         deadline: float,
         emit: Callable[[str], None],
-        consent_waiter: Callable[[float, threading.Event], None] = _wait_for_consent,
+        consent_waiter: Callable[
+            [float, threading.Event], None
+        ] = _wait_for_consent_poll,
     ):
         self.credentials = credentials
         self.url = f"{colab_domain}/tun/m/credentials-propagation/{endpoint}"
@@ -87,8 +70,8 @@ class DriveAuthCoordinator:
         self._requests: queue.Queue[_DriveRequest] = queue.Queue()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
-        self._seen: set[str] = set()
-        self._replied: set[str] = set()
+        self._seen: set[str | int] = set()
+        self._replied: set[str | int] = set()
         self._error: DriveAuthError | None = None
 
     def intercept(self, message: dict[str, Any], wsclient: Any) -> bool:
@@ -96,7 +79,9 @@ class DriveAuthCoordinator:
         if request.get("authType") != "dfs_ephemeral":
             return False
         message_id = message.get("metadata", {}).get("colab_msg_id")
-        if not isinstance(message_id, str) or not message_id:
+        valid_string_id = isinstance(message_id, str) and bool(message_id)
+        valid_integer_id = type(message_id) is int
+        if not (valid_string_id or valid_integer_id):
             return False
 
         with self._lock:
@@ -113,7 +98,10 @@ class DriveAuthCoordinator:
                 self._thread.start()
         self._log(
             "colab_request",
-            {"type": "dfs_ephemeral", "colab_msg_id": message_id},
+            {
+                "type": "dfs_ephemeral",
+                "colab_msg_id_type": type(message_id).__name__,
+            },
         )
         return True
 
@@ -209,6 +197,19 @@ class DriveAuthCoordinator:
         )
         if dry_run.get("success") is not True:
             self._authorize(dry_run)
+            while dry_run.get("success") is not True:
+                poll_timeout = min(
+                    CONSENT_POLL_INTERVAL_SEC,
+                    self._remaining("consent"),
+                )
+                self.consent_waiter(poll_timeout, self.cancelled)
+                dry_run = self._request_json(
+                    "POST",
+                    "consent_poll",
+                    params=params,
+                    headers=headers,
+                    files=files,
+                )
 
         final_params = {**params, "dryrun": "false"}
         propagated = self._request_json(
@@ -227,9 +228,9 @@ class DriveAuthCoordinator:
         self.emit(
             "[colab] Google Drive authorization is required.\n"
             f"Visit:\n\n{uri}\n\n"
-            "Press Enter after access is granted..."
+            "Waiting for access to be granted; this command will resume "
+            "automatically..."
         )
-        self.consent_waiter(self._remaining("consent"), self.cancelled)
 
     @staticmethod
     def _valid_authorization_uri(uri: Any) -> bool:

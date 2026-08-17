@@ -8,7 +8,7 @@ Eleven scenarios that exercise common workflows, plus a final "bridging back to 
 **Methodology**
 - Auth: `--auth=adc`. To set up: `gcloud auth application-default login --scopes=openid,https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/userinfo.email,https://www.googleapis.com/auth/colaboratory`.
 - Accelerator: every session uses **CPU**. Provisioning real accelerators is gated by per-account quota and would not work for most readers; the workflows themselves are accelerator-agnostic, so where a demo's narrative mentions a GPU or TPU the prose flags the substitution.
-- Interactive subcommands — `colab auth`, `colab drivemount`, and unpiped `colab repl` / `colab console` — are **not run** here because they require human interaction at a TTY. Demos that would normally use them include an inline note explaining what they do and the workflow continues with the non-interactive parts.
+- Human-assisted subcommands — `colab auth`, `colab drivemount`, and unpiped `colab repl` / `colab console` — were **not run** in this 2026-05-07 capture. Current `drivemount` still requires the user to approve browser consent, but it polls for completion and no longer requires a terminal Enter handoff. Demos that would normally use these commands include an inline skip note.
 - `enable_update_check` is set to `false` in `~/.config/colab-cli/settings.json` for the duration of recording so the daily upgrade banner doesn't pollute output.
 - `PYTHONWARNINGS=ignore` is set in the environment to suppress the ADC quota-project warning that `google.auth` emits on every call from end-user credentials.
 
@@ -27,7 +27,7 @@ uv run colab --auth=adc new -s research
 [colab] Session READY.
 ```
 
-*Skipped:* `colab auth -s research` and `colab drivemount -s research`. Both require interactive TTY consent — `auth` prompts the user to visit an OAuth URL and paste back a verification code; `drivemount` prompts for an Enter keypress after the user grants consent in their browser. Verified separately in `integration/`.
+*Skipped in the original capture:* `colab auth -s research` and `colab drivemount -s research`. `auth` prompts the user to visit an OAuth URL and paste back a verification code. `drivemount` requires browser approval; since 2026-08-18 it detects that approval by polling and resumes automatically without an Enter keypress.
 
 ```bash
 uv run colab --auth=adc install -s research jax 2>&1 | tail -20
@@ -457,7 +457,7 @@ uv run colab --auth=adc stop -s pivot
 
 ## Demo 8: Local + cloud hybrid
 
-Run a local script against the remote VM and pull a result back. The full-fidelity version of this demo also calls `colab drivemount` to make Google Drive available at `/content/drive` on the VM (so the script can read shared data); `drivemount` is interactive and skipped here. The kept portion — `colab exec -f local_script.py` running a script that lives on your laptop against a kernel that lives in Colab — is the workflow worth highlighting.
+Run a local script against the remote VM and pull a result back. The full-fidelity version of this demo also calls `colab drivemount` to make Google Drive available at `/content/drive` on the VM (so the script can read shared data); it needs human browser consent and was skipped in this capture. The kept portion — `colab exec -f local_script.py` running a script that lives on your laptop against a kernel that lives in Colab — is the workflow worth highlighting.
 
 ```bash
 uv run colab --auth=adc new -s hybrid

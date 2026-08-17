@@ -82,6 +82,49 @@ def test_drive_coordinator_success_replies_once_with_bounded_requests():
     assert "secret-colab-token" not in serialized_history
 
 
+def test_drive_coordinator_accepts_integer_message_id_and_preserves_its_type():
+    coordinator, _credentials, _history, _emit = _coordinator(
+        [
+            _response({"token": "token"}),
+            _response({"success": True}),
+            _response({"success": True}),
+        ]
+    )
+    wsclient = MagicMock()
+
+    assert coordinator.intercept(_request(msg_id=17), wsclient) is True
+    coordinator.wait()
+
+    reply = wsclient.stdin_channel.send.call_args.args[0]
+    assert reply["content"]["value"]["colab_msg_id"] == 17
+    assert type(reply["content"]["value"]["colab_msg_id"]) is int
+
+
+def test_drive_coordinator_does_not_persist_raw_message_id():
+    message_id = "CANARY-colab-message-id"
+    coordinator, _credentials, history, _emit = _coordinator(
+        [
+            _response({"token": "token"}),
+            _response({"success": True}),
+            _response({"success": True}),
+        ]
+    )
+
+    coordinator.intercept(_request(msg_id=message_id), MagicMock())
+    coordinator.wait()
+
+    assert message_id not in json.dumps(
+        [call.args for call in history.log_event.call_args_list]
+    )
+
+
+@pytest.mark.parametrize("message_id", [None, "", True, 1.5, [], {}])
+def test_drive_coordinator_rejects_invalid_message_id_types(message_id):
+    coordinator, *_ = _coordinator([])
+
+    assert coordinator.intercept(_request(msg_id=message_id), MagicMock()) is False
+
+
 def test_drive_coordinator_redacts_valid_authorization_uri():
     uri = "https://accounts.google.com/o/oauth2/v2/auth?state=secret-state"
     consent_waiter = MagicMock()
@@ -89,6 +132,7 @@ def test_drive_coordinator_redacts_valid_authorization_uri():
         [
             _response({"token": "token"}),
             _response({"success": False, "unauthorized_redirect_uri": uri}),
+            _response({"success": True}),
             _response({"success": True}),
         ],
         consent_waiter=consent_waiter,
@@ -106,6 +150,33 @@ def test_drive_coordinator_redacts_valid_authorization_uri():
     assert uri not in json.dumps(
         [call.args for call in history.log_event.call_args_list]
     )
+    wsclient.stdin_channel.send.assert_called_once()
+
+
+def test_drive_coordinator_polls_until_consent_is_observed_before_propagating():
+    uri = "https://accounts.google.com/o/oauth2/v2/auth?state=secret-state"
+    consent_waiter = MagicMock()
+    coordinator, credentials, _history, emit = _coordinator(
+        [
+            _response({"token": "token"}),
+            _response({"success": False, "unauthorized_redirect_uri": uri}),
+            _response({"success": False, "unauthorized_redirect_uri": uri}),
+            _response({"success": True}),
+            _response({"success": True}),
+        ],
+        consent_waiter=consent_waiter,
+    )
+    wsclient = MagicMock()
+
+    coordinator.intercept(_request(), wsclient)
+    coordinator.wait()
+
+    assert consent_waiter.call_count == 2
+    assert credentials.request.call_count == 5
+    assert sum(uri in str(call.args) for call in emit.call_args_list) == 1
+    dry_run_calls = credentials.request.call_args_list[1:4]
+    assert all(call.kwargs["params"]["dryrun"] == "true" for call in dry_run_calls)
+    assert credentials.request.call_args_list[4].kwargs["params"]["dryrun"] == "false"
     wsclient.stdin_channel.send.assert_called_once()
 
 
