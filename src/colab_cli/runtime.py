@@ -162,7 +162,7 @@ class ColabRuntime:
         }
         if self.session_id:
             client_kwargs["session"] = self.session_id
-        self._kernel_client = jupyter_kernel_client.KernelClient(
+        self._kernel_client = jupyter_kernel_client.JupyterKernelClient(
             server_url=self.url,
             token=self.token,
             kernel_id=self.kernel_id,

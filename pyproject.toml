@@ -30,7 +30,7 @@ dependencies = [
     "google-auth>=2.49.1",
     "google-auth-oauthlib>=1.3.0",
     "html2text>=2024.2.26",
-    "jupyter-kernel-client",
+    "jupyter-kernel-client==1.0.1",
     "nbformat>=5.10.4",
     "packaging>=24.0",
     "prompt-toolkit>=3.0.52",
@@ -70,9 +70,6 @@ package = true
 
 [[tool.uv.index]]
 url = "https://pypi.org/simple"
-
-[tool.uv.sources]
-jupyter-kernel-client = { git = "https://github.com/googlecolab/jupyter-kernel-client.git" }
 
 [dependency-groups]
 dev = [

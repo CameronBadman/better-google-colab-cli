@@ -24,7 +24,7 @@ import pytest
 from colab_cli.runtime import ColabRuntime
 
 
-@patch("colab_cli.runtime.jupyter_kernel_client.KernelClient")
+@patch("colab_cli.runtime.jupyter_kernel_client.JupyterKernelClient")
 def test_colab_runtime_kernel_client(mock_kc_cls):
     mock_kc = mock_kc_cls.return_value
 

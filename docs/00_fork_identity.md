@@ -1,8 +1,10 @@
 ---
 title: Fork identity and packaging
 status: implemented
-last_updated: 2026-07-18
+last_updated: 2026-08-18
 change_log:
+  - date: 2026-08-18
+    summary: Pinned distributable metadata to the released kernel client whose private transport boundary is exercised by the CLI, and added clean-wheel install smoke checks to CI and release builds.
   - date: 2026-07-18
     summary: Removed the stale bundled operator skill and its compatibility command in favor of one canonical portable skill under .agents.
   - date: 2026-07-17
@@ -19,6 +21,14 @@ implementation package, but its only console script is `better-colab`.
 is `colab`. Its build metadata derives the same version from Git as the core
 wheel and declares an exact dependency on that version. This prevents a legacy
 entry point from silently targeting a different core implementation.
+
+The core wheel declares `jupyter-kernel-client==1.0.1`. This is intentionally
+exact because the controller and retained compatibility runtime use a tested
+private transport boundary. Source tests and build workflows verify the
+released dependency's class name, websocket queues, subprotocol selection,
+headers, and extra query-parameter support. CI and release builds install the
+built wheel into a clean environment before accepting the artifact, so a
+source-only override cannot mask invalid wheel metadata.
 
 The Better surface is constructed from the retained command modules without
 registering `drivemount`. The compatibility surface retains that command.
@@ -40,3 +50,5 @@ The README identifies the fork as unofficial and unaffiliated.
 - Invoke an ordinary command while spying on update code.
 - Build both wheel/sdist pairs and inspect entry points, versions, and the
   compatibility wheel's exact dependency.
+- Install the core wheel in a clean environment and exercise the exact
+  private kernel-client surface used at runtime.

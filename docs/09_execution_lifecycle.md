@@ -1,8 +1,10 @@
 ---
 title: Durable execution lifecycle
 status: implemented
-last_updated: 2026-07-17
+last_updated: 2026-08-18
 change_log:
+  - date: 2026-08-18
+    summary: Moved the private kernel transport boundary to the exact released 1.0.1 dependency and added clean-wheel conformance checks so source resolution cannot differ silently from installed artifacts.
   - date: 2026-07-17
     summary: Added exact notebook-cell source capture and restart-safe parent batch scheduling with default stop, continue-on-error, and cancellation policy.
   - date: 2026-07-17
@@ -23,10 +25,13 @@ selected profile.
 
 ## Dispatch and proof
 
-The only private `jupyter-kernel-client` access is in
-`better_colab.kernel_transport`. Its conformance test pins version `0.8.0` at
-commit `f18e982c3265df5e923aa9def101ab3fd737e139` and verifies the session,
-channel-queue, connection-event, and raw-send shape used by the controller.
+The private `jupyter-kernel-client` execution access is concentrated in
+`better_colab.kernel_transport`; the retained compatibility runtime owns the
+constructor boundary. The distribution pins the released version `1.0.1`.
+Conformance tests verify the exported client class, session, channel queues,
+connection event, subprotocol, headers, extra query parameters, and raw-send
+shape used by both paths. CI and release workflows repeat those checks after
+installing the built wheel into a clean environment.
 
 For each request, the adapter constructs one complete `execute_request`. The
 worker commits `queued -> dispatching`, the actual kernel/Jupyter identities,

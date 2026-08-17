@@ -47,6 +47,7 @@ def test_core_distribution_installs_only_better_colab():
         "src/better_colab",
         "src/colab_cli",
     ]
+    assert "jupyter-kernel-client==1.0.1" in metadata["project"]["dependencies"]
 
 
 def test_compat_distribution_installs_only_colab():

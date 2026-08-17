@@ -1,10 +1,10 @@
 import importlib.metadata
-import json
 import queue
 import threading
 
 import pytest
-from jupyter_kernel_client.wsclient import KernelWebSocketClient
+import jupyter_kernel_client
+from jupyter_kernel_client.wsclient import JupyterSubprotocol, KernelWebSocketClient
 
 from better_colab.kernel_transport import (
     ExecutionProof,
@@ -75,18 +75,22 @@ def _message(
 
 def test_pinned_kernel_client_private_conformance():
     distribution = importlib.metadata.distribution("jupyter-kernel-client")
-    direct_url = json.loads(distribution.read_text("direct_url.json"))
-    client = KernelWebSocketClient(endpoint="ws://invalid.example/channels")
-
-    assert distribution.version == "0.8.0"
-    assert (
-        direct_url["vcs_info"]["commit_id"]
-        == "f18e982c3265df5e923aa9def101ab3fd737e139"
+    client = KernelWebSocketClient(
+        endpoint="ws://invalid.example/channels",
+        subprotocol=JupyterSubprotocol.DEFAULT,
+        headers={"X-Test": "value"},
+        extra_params={"runtime-token": "value"},
     )
+
+    assert distribution.version == "1.0.1"
+    assert hasattr(jupyter_kernel_client, "JupyterKernelClient")
     assert hasattr(client, "_shell_msg_queue")
     assert hasattr(client, "_iopub_msg_queue")
     assert hasattr(client, "_message_received")
     assert hasattr(client, "connection_ready")
+    assert client._subprotocol is JupyterSubprotocol.DEFAULT
+    assert client._headers == {"X-Test": "value"}
+    assert client._extra_params == {"runtime-token": "value"}
     assert callable(client.session.msg)
 
 

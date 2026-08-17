@@ -26,6 +26,11 @@ jobs:
       - run: uv run python tools/package_plugin.py check
       - run: uv run python tools/package_plugin.py build --out-dir dist
       - run: uv build --out-dir dist
+      - name: Verify the core wheel's private kernel-client boundary
+        run: |
+          uv venv .wheel-smoke
+          uv pip install --python .wheel-smoke/bin/python dist/better_google_colab_cli-*.whl
+          .wheel-smoke/bin/python -c 'import importlib.metadata as m; import jupyter_kernel_client as j; from jupyter_kernel_client.wsclient import JupyterSubprotocol, KernelWebSocketClient; assert m.version("jupyter-kernel-client") == "1.0.1"; client = KernelWebSocketClient(endpoint="ws://invalid.example/channels", subprotocol=JupyterSubprotocol.DEFAULT, headers={"X-Test": "value"}, extra_params={"runtime-token": "value"}); assert hasattr(j, "JupyterKernelClient"); assert hasattr(client, "_shell_msg_queue"); assert client._headers == {"X-Test": "value"}; assert client._extra_params == {"runtime-token": "value"}'
       - run: uv build compat --out-dir dist
       - uses: actions/upload-artifact@v4
         with:
