@@ -16,6 +16,7 @@ from unittest.mock import patch
 import pytest
 from typer.testing import CliRunner
 from colab_cli.cli import app
+from colab_cli.drive_auth import DriveAuthError
 from colab_cli.state import SessionState
 
 runner = CliRunner()
@@ -129,6 +130,35 @@ def test_cli_drivemount_read_only_generates_readonly_mount(
     assert result.exit_code == 0, result.output
     called_code = mock_runtime.execute_code.call_args.args[0]
     assert "drive.mount('/content/drive', readonly=True)" in called_code
+
+
+@patch("colab_cli.commands.automation.compatibility_session_lease")
+@patch("colab_cli.commands.automation.run_automation")
+@patch("colab_cli.common.state")
+def test_cli_drivemount_reports_sanitized_failure_without_traceback(
+    mock_state, run_automation, lease, mock_session
+):
+    import contextlib
+
+    canary = "CANARY-internal-drive-error"
+
+    def fail(*_args, **_kwargs):
+        try:
+            raise RuntimeError(canary)
+        except RuntimeError as error:
+            raise DriveAuthError("cancelled", phase="consent") from error
+
+    mock_state.store.get.return_value = mock_session
+    mock_state.resolve_session.return_value = "test-session"
+    lease.return_value = contextlib.nullcontext()
+    run_automation.side_effect = fail
+
+    result = runner.invoke(app, ["drivemount", "-s", "test-session"])
+
+    assert result.exit_code == 1
+    assert "Drive authorization failed: cancelled phase=consent" in result.output
+    assert "Traceback" not in result.output
+    assert canary not in result.output
 
 
 @patch("colab_cli.commands.automation.ColabRuntime")

@@ -1,5 +1,6 @@
 ---
 log:
+2026-08-18: Retried the corrected flow on one disposable CPU runtime after a guarded nonce execution succeeded. The dry run emitted one validated consent URL, but the human approval occurred after the 600-second command deadline, so the coordinator had already cancelled before Continue and no final propagation request was made. A retry then failed locally before contacting Colab because host ADC required separate reauthentication. The exact runtime endpoint later returned HTTP 404; its stale local keep-alive and session record were removed. Account-wide absence could not be freshly listed with expired ADC. This attempt does not verify final propagation, mounting, or an upstream failure. Drive authorization errors now exit with one sanitized phase-specific message instead of rendering Typer's internal traceback.
 2026-08-18: Corrected Drive credential propagation after comparing the timed-out live trace with the official Colab client. Correlation IDs may be strings or integers and are echoed with their exact wire type while raw values stay out of history. The coordinator now performs one fresh-token/bodyless dry run, waits for one explicit `/dev/tty` Continue after the browser's close-window page when consent is needed, then performs a second fresh-token/bodyless final propagation and accepts only `success: true`. It no longer polls, reuses an XSRF token, or sends multipart `file_id`. Added `colab drivemount --read-only`, which generates `drive.mount(path, readonly=True)` while preserving the read-write default. The packaged runtime continues to use the released `jupyter-kernel-client==1.0.1` API. The earlier live timeout verifies the removed polling deadlock, not final propagation or mounting; live acceptance of the corrected sequence remains pending.
 2026-08-15: Hardened the compatibility automation boundary after credential-bearing request metadata, response bodies, Drive authorization URLs, and stdin values were found in local diagnostics. HTTP logs are now metadata-only and query-free behind a rotating private sink with defense-in-depth redaction; Drive propagation uses a bounded, cancellable coordinator with strict response and redirect validation; interactive execution has a real 600-second wall-clock deadline plus best-effort kernel interrupt; generated Drive/install source uses Python literals; and legacy history can be scrubbed idempotently without racing active writers. Canary tests assert secrets are absent from every persisted and rendered sink.
 2026-08-15: Fixed the compatibility runtime's Jupyter stdin handling. Current `jupyter-kernel-client` passes a full `input_request` message to hooks, invokes them synchronously, and ignores return values, so the former prompt-string wrapper collected OAuth codes locally without sending them to the VM. The wrapper now mirrors the installed hook contract, explicitly sends `input_reply`, avoids replying to stale requests, uses `getpass` for password prompts, and records only `<redacted>` in history. Added regression coverage for normal, password, stale-request, EOF, cancellation, and invalid/foreign-message paths.
@@ -193,6 +194,16 @@ JSON mode emits one schema-v1 result and maps a proven kernel error to
     keep-alive processes were terminated. This is evidence of the removed
     protocol deadlock; it is not evidence that the new final propagation or
     Drive mounting succeeded.
+-   **Corrected-flow live attempt (2026-08-18)**: One disposable CPU runtime
+    passed a guarded nonce execution and emitted one validated consent URL.
+    Human approval arrived after the command's 600-second deadline, so the
+    coordinator had already cancelled before Continue and did not attempt
+    final propagation. A retry was blocked locally because host ADC then
+    required separate reauthentication. The exact runtime endpoint later
+    returned HTTP 404, after which only its stale local keep-alive process and
+    session record were removed. Expired ADC prevented a fresh account-wide
+    session listing. This attempt verifies neither final propagation nor a
+    Drive mount, and it supplies no basis for classifying an upstream failure.
 
 ### 4. Logging and Notebook Capture (`colab log`)
 

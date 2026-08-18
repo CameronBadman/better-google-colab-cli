@@ -37,7 +37,7 @@ from colab_cli.runtime import ColabRuntime
 from colab_cli.contents import ContentsClient
 from colab_cli.auth import get_credentials
 from colab_cli.client import Prod
-from colab_cli.drive_auth import DriveAuthCoordinator
+from colab_cli.drive_auth import DriveAuthCoordinator, DriveAuthError
 from colab_cli.utils import render_display_data
 
 _console = Console()
@@ -260,18 +260,22 @@ def drivemount(
     legacy_session = state.store.get(name)
     code = _build_drivemount_code(path, read_only=read_only)
     typer.echo(f"[colab] Mounting Google Drive to '{path}' on {name}...")
-    with compatibility_session_lease(
-        name,
-        endpoint=getattr(legacy_session, "endpoint", None),
-    ):
-        run_automation(
+    try:
+        with compatibility_session_lease(
             name,
-            "drivemount",
-            code,
-            allow_stdin=True,
-            path=path,
-            timeout=INTERACTIVE_AUTOMATION_TIMEOUT_SEC,
-        )
+            endpoint=getattr(legacy_session, "endpoint", None),
+        ):
+            run_automation(
+                name,
+                "drivemount",
+                code,
+                allow_stdin=True,
+                path=path,
+                timeout=INTERACTIVE_AUTOMATION_TIMEOUT_SEC,
+            )
+    except DriveAuthError as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(1) from None
 
 
 def install(
