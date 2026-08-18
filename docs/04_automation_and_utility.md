@@ -1,6 +1,6 @@
 ---
 log:
-2026-08-18: Updated Drive credential propagation for the current observed Colab protocol. Correlation IDs may be strings or integers and are echoed with their exact wire type while raw values stay out of history. Consent no longer relies on a terminal Enter handoff: after emitting one validated Google URL, the coordinator polls the bounded dry-run endpoint and propagates only after the backend reports success. The packaged runtime now uses the released `jupyter-kernel-client==1.0.1` API rather than a source-only Git override that wheels did not preserve. A live run verified integer-ID interception, redaction, one-time URL emission, automatic waiting, and bounded timeout; because no completed browser grant was observed, final propagation and mounting remain unverified.
+2026-08-18: Corrected Drive credential propagation after comparing the timed-out live trace with the official Colab client. Correlation IDs may be strings or integers and are echoed with their exact wire type while raw values stay out of history. The coordinator now performs one fresh-token/bodyless dry run, waits for one explicit `/dev/tty` Continue after the browser's close-window page when consent is needed, then performs a second fresh-token/bodyless final propagation and accepts only `success: true`. It no longer polls, reuses an XSRF token, or sends multipart `file_id`. Added `colab drivemount --read-only`, which generates `drive.mount(path, readonly=True)` while preserving the read-write default. The packaged runtime continues to use the released `jupyter-kernel-client==1.0.1` API. The earlier live timeout verifies the removed polling deadlock, not final propagation or mounting; live acceptance of the corrected sequence remains pending.
 2026-08-15: Hardened the compatibility automation boundary after credential-bearing request metadata, response bodies, Drive authorization URLs, and stdin values were found in local diagnostics. HTTP logs are now metadata-only and query-free behind a rotating private sink with defense-in-depth redaction; Drive propagation uses a bounded, cancellable coordinator with strict response and redirect validation; interactive execution has a real 600-second wall-clock deadline plus best-effort kernel interrupt; generated Drive/install source uses Python literals; and legacy history can be scrubbed idempotently without racing active writers. Canary tests assert secrets are absent from every persisted and rendered sink.
 2026-08-15: Fixed the compatibility runtime's Jupyter stdin handling. Current `jupyter-kernel-client` passes a full `input_request` message to hooks, invokes them synchronously, and ignores return values, so the former prompt-string wrapper collected OAuth codes locally without sending them to the VM. The wrapper now mirrors the installed hook contract, explicitly sends `input_reply`, avoids replying to stale requests, uses `getpass` for password prompts, and records only `<redacted>` in history. Added regression coverage for normal, password, stale-request, EOF, cancellation, and invalid/foreign-message paths.
 2026-07-18: Routed `better-colab install` through durable execution while retaining `colab install` as the direct compatibility path. Package arguments are emitted as safe Python literals; local requirements bytes are embedded in the protected queued source, recreated in a deterministic remote temporary file, and removed after pip/uv finishes. JSON mode suppresses installer output and maps proven execution failure to `INSTALL_FAILED`/exit 1. Also fixed `whoami` to resolve the callback-configured auth state lazily.
@@ -149,6 +149,9 @@ JSON mode emits one schema-v1 result and maps a proven kernel error to
     proprietary credential propagation flow.
 -   **Code**: `python from google.colab import drive
     drive.mount('/content/drive')`
+-   **Read-only mode**: `colab drivemount --read-only` generates
+    `drive.mount('/content/drive', readonly=True)`. The compatibility default
+    remains read-write.
 -   **Handling**: Because `drivefs` enforces the ephemeral side-channel
     propagation (`colab_request` over websocket), the CLI intercepts these
     messages using `ColabRuntime.colab_request_hook`. The websocket callback
@@ -159,13 +162,20 @@ JSON mode emits one schema-v1 result and maps a proven kernel error to
     type, string-or-integer correlation IDs, and an HTTPS
     `accounts.google.com/o/oauth2/` consent origin. The exact ID value and wire
     type are preserved in the reply, but history records only the ID type.
-    When authorization is required, the validated URL is emitted once and the
-    coordinator repeats the side-effect-free dry run every two seconds until
-    the backend reports success. Only then does it perform final propagation;
-    there is no terminal keypress handoff. Duplicate IDs are de-duplicated,
-    queue-drain races are serialized, and every accepted request receives
-    exactly one correlated `colab_reply`, including sanitized failure and
-    cancellation paths.
+    Each propagation attempt obtains its own XSRF token with a GET and follows
+    it with a bodyless POST carrying `Accept: application/json`,
+    `X-Colab-Client-Agent: colab-cli`, bearer authentication, and the XSRF
+    header. The first attempt is one dry run. When authorization is required,
+    the validated URL is emitted once and the coordinator waits on `/dev/tty`
+    for one Enter after the browser shows its close-window page. That Continue
+    authorizes a fresh final attempt; it is not treated as evidence of consent,
+    and only final `success: true` is accepted. There is no dry-run polling,
+    XSRF-token reuse, multipart body, or VS Code impersonation. Duplicate IDs
+    are de-duplicated, queue-drain races are serialized, and every accepted
+    request receives exactly one correlated `colab_reply`, including sanitized
+    failure, cancellation, TTY-unavailable, EOF, and deadline paths. HTTP
+    history retains only phase, method, status, byte count, `success`, and
+    `has_redirect`.
 -   **Timeout**: `INTERACTIVE_AUTOMATION_TIMEOUT_SEC` is 600 seconds for both
     `colab auth` and `colab drivemount`. `ColabRuntime` enforces it as a real
     POSIX wall-clock deadline around the complete synchronous call rather than
@@ -173,16 +183,16 @@ JSON mode emits one schema-v1 result and maps a proven kernel error to
     trigger a bounded best-effort remote-kernel interrupt before the original
     exception is re-raised; finite deadlines fail explicitly off the main
     thread or on platforms without POSIX interval timers.
--   **Live verification (2026-08-18)**: A source-checkout wheel using the
+-   **Historical live diagnostic (2026-08-18)**: A source-checkout wheel using the
     released kernel dependency executed a remote control probe in 3.5 seconds.
     A subsequent Drive request arrived with an integer correlation ID, emitted
     one validated consent URL, and persisted only the ID type plus a redacted
-    URI. The coordinator waited for the full bounded interval and then raised
-    `deadline_exceeded` because the backend never reported completed browser
-    consent. Both disposable CPU sessions and keep-alive processes were
-    terminated. This verifies the repaired request and waiting boundary, but
-    it is not evidence that final credential propagation or Drive mounting
-    succeeded.
+    URI. The then-current polling coordinator waited for the full bounded
+    interval and raised `deadline_exceeded` because the browser close-window
+    page has no notification path to the CLI. Both disposable CPU sessions and
+    keep-alive processes were terminated. This is evidence of the removed
+    protocol deadlock; it is not evidence that the new final propagation or
+    Drive mounting succeeded.
 
 ### 4. Logging and Notebook Capture (`colab log`)
 
@@ -369,9 +379,11 @@ TDD is mandatory for all automation features.
     timeout, and off-main-thread deadline rejection without persisting values.
 -   **Test Case**: Exercise Drive success, consent, malformed/oversized/non-2xx
     responses, malicious redirects, string and integer correlation IDs,
-    repeated consent polling, duplicate IDs, queue-drain concurrency, network
-    timeout, cancellation, and reply failure; every accepted request must
-    unblock exactly once and every error must remain sanitized.
+    one explicit Continue, already-authorized flow, fresh XSRF tokens, empty
+    POST bodies, TTY-unavailable/EOF behavior, duplicate IDs, queue-drain
+    concurrency, network timeout, cancellation, deadlines, and reply failure;
+    every accepted request must unblock exactly once and every error must
+    remain sanitized.
 -   **Test Case**: Seed unique canaries in HTTP query parameters, headers,
     cookies, response bodies, authorization URLs, prompts, and replies, then
     assert each canary is absent from log/history files and raised exception

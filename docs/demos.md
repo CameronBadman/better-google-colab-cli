@@ -8,7 +8,7 @@ Eleven scenarios that exercise common workflows, plus a final "bridging back to 
 **Methodology**
 - Auth: `--auth=adc`. To set up: `gcloud auth application-default login --scopes=openid,https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/userinfo.email,https://www.googleapis.com/auth/colaboratory`.
 - Accelerator: every session uses **CPU**. Provisioning real accelerators is gated by per-account quota and would not work for most readers; the workflows themselves are accelerator-agnostic, so where a demo's narrative mentions a GPU or TPU the prose flags the substitution.
-- Human-assisted subcommands — `colab auth`, `colab drivemount`, and unpiped `colab repl` / `colab console` — were **not run** in this 2026-05-07 capture. Current `drivemount` still requires the user to approve browser consent, but it polls for completion and no longer requires a terminal Enter handoff. Demos that would normally use these commands include an inline skip note.
+- Human-assisted subcommands — `colab auth`, `colab drivemount`, and unpiped `colab repl` / `colab console` — were **not run** in this 2026-05-07 capture. Current `drivemount` requires the user to approve browser consent and press Enter once after the browser shows its close-window page; final backend propagation, not the keypress, determines success. Demos that would normally use these commands include an inline skip note.
 - `enable_update_check` is set to `false` in `~/.config/colab-cli/settings.json` for the duration of recording so the daily upgrade banner doesn't pollute output.
 - `PYTHONWARNINGS=ignore` is set in the environment to suppress the ADC quota-project warning that `google.auth` emits on every call from end-user credentials.
 
@@ -27,7 +27,7 @@ uv run colab --auth=adc new -s research
 [colab] Session READY.
 ```
 
-*Skipped in the original capture:* `colab auth -s research` and `colab drivemount -s research`. `auth` prompts the user to visit an OAuth URL and paste back a verification code. `drivemount` requires browser approval; since 2026-08-18 it detects that approval by polling and resumes automatically without an Enter keypress.
+*Skipped in the original capture:* `colab auth -s research` and `colab drivemount -s research`. `auth` prompts the user to visit an OAuth URL and paste back a verification code. `drivemount` requires browser approval, one terminal Enter after the browser's close-window page, and a successful final backend propagation response.
 
 ```bash
 uv run colab --auth=adc install -s research jax 2>&1 | tail -20

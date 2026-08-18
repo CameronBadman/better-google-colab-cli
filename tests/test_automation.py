@@ -110,6 +110,27 @@ def test_cli_drivemount(
     assert kwargs.get("timeout") is not None and kwargs["timeout"] >= 300
 
 
+@patch("colab_cli.commands.automation.get_credentials")
+@patch("colab_cli.commands.automation.ColabRuntime")
+@patch("colab_cli.common.state")
+def test_cli_drivemount_read_only_generates_readonly_mount(
+    mock_state, mock_runtime_class, _mock_get_credentials, mock_session
+):
+    mock_state.store.get.return_value = mock_session
+    mock_state.resolve_session.return_value = "test-session"
+    mock_runtime = mock_runtime_class.return_value
+    mock_runtime.execute_code.return_value = [{"text": "Mounted"}]
+
+    result = runner.invoke(
+        app,
+        ["drivemount", "--read-only", "-s", "test-session", "/content/drive"],
+    )
+
+    assert result.exit_code == 0, result.output
+    called_code = mock_runtime.execute_code.call_args.args[0]
+    assert "drive.mount('/content/drive', readonly=True)" in called_code
+
+
 @patch("colab_cli.commands.automation.ColabRuntime")
 @patch("colab_cli.common.state")
 def test_auth_does_not_install_drive_hook(mock_state, mock_runtime_class, mock_session):
@@ -167,6 +188,25 @@ def test_generated_drivemount_code_uses_one_safe_string_literal():
     assert len(mount_call.args) == 1
     assert isinstance(mount_call.args[0], ast.Constant)
     assert mount_call.args[0].value == payload
+
+
+def test_generated_read_only_drivemount_code_uses_literal_true_keyword():
+    import ast
+    from colab_cli.commands.automation import _build_drivemount_code
+
+    tree = ast.parse(_build_drivemount_code("/content/drive", read_only=True))
+    mount_call = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "mount"
+    )
+
+    assert len(mount_call.keywords) == 1
+    assert mount_call.keywords[0].arg == "readonly"
+    assert isinstance(mount_call.keywords[0].value, ast.Constant)
+    assert mount_call.keywords[0].value.value is True
 
 
 def test_generated_install_code_uses_safe_list_literal_and_narrow_fallback():

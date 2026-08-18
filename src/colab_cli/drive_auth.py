@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import queue
+import select
 import threading
 import time
 from dataclasses import dataclass
@@ -13,8 +14,10 @@ from urllib.parse import urlsplit
 
 MAX_RESPONSE_BYTES = 1024 * 1024
 HTTP_TIMEOUT_SEC = 30.0
-CONSENT_POLL_INTERVAL_SEC = 2.0
 REDACTED = "<redacted>"
+ACCEPT_JSON = "application/json"
+CLIENT_AGENT = "colab-cli"
+XSRF_HEADER = "X-Goog-Colab-Token"
 
 
 class DriveAuthError(RuntimeError):
@@ -39,9 +42,57 @@ class _DriveRequest:
     message_id: str | int
 
 
-def _wait_for_consent_poll(timeout: float, cancelled: threading.Event) -> None:
-    if cancelled.wait(timeout):
-        raise DriveAuthError("cancelled", phase="consent")
+def _wait_for_continue(
+    timeout: float,
+    cancelled: threading.Event,
+    *,
+    tty_opener: Callable[..., Any] = open,
+    selector: Callable[..., tuple[list[Any], list[Any], list[Any]]] = select.select,
+) -> None:
+    """Wait for one terminal line without consuming kernel stdin.
+
+    The browser's close-window page has no signaling path back to the CLI.  A
+    line read from ``/dev/tty`` is therefore only permission to attempt final
+    propagation; it is never treated as evidence that Google granted access.
+    """
+
+    if timeout <= 0:
+        raise DriveAuthError("deadline_exceeded", phase="consent")
+    try:
+        tty = tty_opener("/dev/tty", "r", encoding="utf-8", errors="strict")
+    except (OSError, ValueError) as error:
+        raise DriveAuthError("tty_unavailable", phase="consent") from error
+
+    expires_at = time.monotonic() + timeout
+    try:
+        while True:
+            if cancelled.is_set():
+                raise DriveAuthError("cancelled", phase="consent")
+            remaining = expires_at - time.monotonic()
+            if remaining <= 0:
+                raise DriveAuthError("deadline_exceeded", phase="consent")
+            try:
+                readable, _, _ = selector(
+                    [tty], [], [], min(0.1, remaining)
+                )
+            except InterruptedError:
+                continue
+            except (OSError, ValueError) as error:
+                raise DriveAuthError("tty_unavailable", phase="consent") from error
+            if not readable:
+                continue
+            try:
+                line = tty.readline()
+            except (OSError, UnicodeError) as error:
+                raise DriveAuthError("tty_read_failed", phase="consent") from error
+            if line == "":
+                raise DriveAuthError("tty_eof", phase="consent")
+            return
+    finally:
+        try:
+            tty.close()
+        except OSError:
+            pass
 
 
 class DriveAuthCoordinator:
@@ -57,7 +108,7 @@ class DriveAuthCoordinator:
         emit: Callable[[str], None],
         consent_waiter: Callable[
             [float, threading.Event], None
-        ] = _wait_for_consent_poll,
+        ] = _wait_for_continue,
     ):
         self.credentials = credentials
         self.url = f"{colab_domain}/tun/m/credentials-propagation/{endpoint}"
@@ -114,7 +165,9 @@ class DriveAuthCoordinator:
             thread.join(timeout=max(0, self.deadline - time.monotonic()))
             if thread.is_alive():
                 self.cancel()
-                raise DriveAuthError("deadline_exceeded", phase="coordinator")
+                thread.join(timeout=0.5)
+                if thread.is_alive():
+                    raise DriveAuthError("deadline_exceeded", phase="coordinator")
         if self._error is not None:
             raise self._error
 
@@ -142,27 +195,56 @@ class DriveAuthCoordinator:
                 self._error = error
 
     def _remaining(self, phase: str) -> float:
-        if self.cancelled.is_set():
-            raise DriveAuthError("cancelled", phase=phase)
         remaining = self.deadline - time.monotonic()
         if remaining <= 0:
             raise DriveAuthError("deadline_exceeded", phase=phase)
+        if self.cancelled.is_set():
+            raise DriveAuthError("cancelled", phase=phase)
         return remaining
 
     def _request_json(self, method: str, phase: str, **kwargs) -> dict[str, Any]:
         timeout = min(HTTP_TIMEOUT_SEC, self._remaining(phase))
+        headers = {
+            "Accept": ACCEPT_JSON,
+            "X-Colab-Client-Agent": CLIENT_AGENT,
+            **kwargs.pop("headers", {}),
+        }
         try:
             response = self.credentials.request(
-                method, self.url, timeout=timeout, **kwargs
+                method, self.url, timeout=timeout, headers=headers, **kwargs
             )
         except Exception as error:
+            self._log_http(
+                phase=phase,
+                method=method,
+                status=None,
+                byte_count=0,
+                success=None,
+                has_redirect=False,
+            )
             raise DriveAuthError("request_failed", phase=phase) from error
         status = int(response.status_code)
-        if not 200 <= status < 300:
-            raise DriveAuthError("http_error", phase=phase, status=status)
         raw = getattr(response, "content", None)
         body = raw if isinstance(raw, bytes) else (response.text or "").encode("utf-8")
+        if not 200 <= status < 300:
+            self._log_http(
+                phase=phase,
+                method=method,
+                status=status,
+                byte_count=len(body),
+                success=None,
+                has_redirect=False,
+            )
+            raise DriveAuthError("http_error", phase=phase, status=status)
         if len(body) > MAX_RESPONSE_BYTES:
+            self._log_http(
+                phase=phase,
+                method=method,
+                status=status,
+                byte_count=len(body),
+                success=None,
+                has_redirect=False,
+            )
             raise DriveAuthError("response_too_large", phase=phase, status=status)
         try:
             text = body.decode("utf-8", errors="strict")
@@ -170,50 +252,103 @@ class DriveAuthCoordinator:
                 text = text[4:].lstrip("\r\n")
             data = json.loads(text)
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            self._log_http(
+                phase=phase,
+                method=method,
+                status=status,
+                byte_count=len(body),
+                success=None,
+                has_redirect=False,
+            )
             raise DriveAuthError(
                 "malformed_response", phase=phase, status=status
             ) from error
         if not isinstance(data, dict):
+            self._log_http(
+                phase=phase,
+                method=method,
+                status=status,
+                byte_count=len(body),
+                success=None,
+                has_redirect=False,
+            )
             raise DriveAuthError("malformed_response", phase=phase, status=status)
+        raw_success = data.get("success")
+        success = raw_success if type(raw_success) is bool else None
+        redirect = data.get("unauthorized_redirect_uri")
+        self._log_http(
+            phase=phase,
+            method=method,
+            status=status,
+            byte_count=len(body),
+            success=success,
+            has_redirect=isinstance(redirect, str) and bool(redirect),
+        )
         return data
 
+    def _log_http(
+        self,
+        *,
+        phase: str,
+        method: str,
+        status: int | None,
+        byte_count: int,
+        success: bool | None,
+        has_redirect: bool,
+    ) -> None:
+        self._log(
+            "drive_auth_http",
+            {
+                "phase": phase,
+                "method": method,
+                "status": status,
+                "byte_count": byte_count,
+                "success": success,
+                "has_redirect": has_redirect,
+            },
+        )
+
+    def _propagation_attempt(
+        self,
+        params: dict[str, str],
+        *,
+        token_phase: str,
+        post_phase: str,
+    ) -> dict[str, Any]:
+        token_data = self._request_json("GET", token_phase, params=params)
+        token = token_data.get("token")
+        if not isinstance(token, str) or not token:
+            raise DriveAuthError("missing_token", phase=token_phase)
+        return self._request_json(
+            "POST",
+            post_phase,
+            params=params,
+            headers={XSRF_HEADER: token},
+        )
+
     def _propagate(self) -> None:
-        params = {
+        base_params = {
             "authuser": "0",
             "authtype": "dfs_ephemeral",
             "version": "2",
-            "dryrun": "true",
             "propagate": "true",
             "record": "false",
         }
-        token_data = self._request_json("GET", "token", params=params)
-        token = token_data.get("token")
-        if not isinstance(token, str) or not token:
-            raise DriveAuthError("missing_token", phase="token")
-        headers = {"x-goog-colab-token": token}
-        files = {"file_id": (None, "empty.ipynb")}
-        dry_run = self._request_json(
-            "POST", "dry_run", params=params, headers=headers, files=files
+        dry_run_params = {**base_params, "dryrun": "true"}
+        dry_run = self._propagation_attempt(
+            dry_run_params,
+            token_phase="dry_run_token",
+            post_phase="dry_run",
         )
         if dry_run.get("success") is not True:
             self._authorize(dry_run)
-            while dry_run.get("success") is not True:
-                poll_timeout = min(
-                    CONSENT_POLL_INTERVAL_SEC,
-                    self._remaining("consent"),
-                )
-                self.consent_waiter(poll_timeout, self.cancelled)
-                dry_run = self._request_json(
-                    "POST",
-                    "consent_poll",
-                    params=params,
-                    headers=headers,
-                    files=files,
-                )
+            self.consent_waiter(self._remaining("consent"), self.cancelled)
 
-        final_params = {**params, "dryrun": "false"}
-        propagated = self._request_json(
-            "POST", "propagate", params=final_params, headers=headers, files=files
+        final_params = {**base_params, "dryrun": "false"}
+        propagated = self._propagation_attempt(
+            final_params,
+            token_phase="propagate_token",
+            post_phase="propagate",
         )
         if propagated.get("success") is not True:
             raise DriveAuthError("propagation_rejected", phase="propagate")
@@ -228,8 +363,8 @@ class DriveAuthCoordinator:
         self.emit(
             "[colab] Google Drive authorization is required.\n"
             f"Visit:\n\n{uri}\n\n"
-            "Waiting for access to be granted; this command will resume "
-            "automatically..."
+            "After the browser shows 'Please close this tab / window', "
+            "return here and press Enter to continue."
         )
 
     @staticmethod

@@ -88,8 +88,12 @@ def _build_drive_coordinator(state, session, timeout):
     )
 
 
-def _build_drivemount_code(path: str) -> str:
-    return f"from google.colab import drive\ndrive.mount({path!r})"
+def _build_drivemount_code(path: str, *, read_only: bool = False) -> str:
+    readonly_argument = ", readonly=True" if read_only else ""
+    return (
+        "from google.colab import drive\n"
+        f"drive.mount({path!r}{readonly_argument})"
+    )
 
 
 def _build_install_code(commands: list[str]) -> str:
@@ -241,13 +245,20 @@ def drivemount(
         Optional[str], typer.Option("-s", "--session", help="Session name")
     ] = None,
     path: Annotated[str, typer.Argument(help="Mount path")] = "/content/drive",
+    read_only: Annotated[
+        bool,
+        typer.Option(
+            "--read-only",
+            help="Mount Drive read-only (the default remains read-write)",
+        ),
+    ] = False,
 ):
     """Mount Google Drive at path"""
     from colab_cli.common import state
 
     name = state.resolve_session(session)
     legacy_session = state.store.get(name)
-    code = _build_drivemount_code(path)
+    code = _build_drivemount_code(path, read_only=read_only)
     typer.echo(f"[colab] Mounting Google Drive to '{path}' on {name}...")
     with compatibility_session_lease(
         name,

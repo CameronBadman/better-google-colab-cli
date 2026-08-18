@@ -1,4 +1,5 @@
 import json
+import io
 import queue
 import threading
 import time
@@ -11,6 +12,7 @@ from colab_cli.drive_auth import (
     MAX_RESPONSE_BYTES,
     DriveAuthCoordinator,
     DriveAuthError,
+    _wait_for_continue,
 )
 
 
@@ -45,20 +47,28 @@ def _coordinator(responses, **kwargs):
         endpoint="endpoint-1",
         session_name="session-1",
         history=history,
-        deadline=time.monotonic() + 2,
+        deadline=kwargs.get("deadline", time.monotonic() + 2),
         emit=emit,
         consent_waiter=kwargs.get("consent_waiter", MagicMock()),
     )
     return coordinator, credentials, history, emit
 
 
-def test_drive_coordinator_success_replies_once_with_bounded_requests():
+def _authorized_responses(token_1="token-1", token_2="token-2"):
+    return [
+        _response({"token": token_1}),
+        _response({"success": True}),
+        _response({"token": token_2}),
+        _response({"success": True}),
+    ]
+
+
+def test_drive_coordinator_uses_exact_bodyless_sequence_and_fresh_tokens():
     coordinator, credentials, history, _emit = _coordinator(
-        [
-            _response({"token": "secret-colab-token"}),
-            _response({"success": True}),
-            _response({"success": True}),
-        ]
+        _authorized_responses(
+            "CANARY-secret-colab-token-one",
+            "CANARY-secret-colab-token-two",
+        )
     )
     wsclient = MagicMock()
     message = _request()
@@ -73,23 +83,56 @@ def test_drive_coordinator_success_replies_once_with_bounded_requests():
         "colab_msg_id": "msg-1",
     }
     assert reply["parent_header"] == message["header"]
-    assert credentials.request.call_count == 3
-    for call in credentials.request.call_args_list:
+    assert credentials.request.call_count == 4
+    calls = credentials.request.call_args_list
+    assert [call.args[0] for call in calls] == ["GET", "POST", "GET", "POST"]
+    assert [call.kwargs["params"]["dryrun"] for call in calls] == [
+        "true",
+        "true",
+        "false",
+        "false",
+    ]
+    assert "X-Goog-Colab-Token" not in calls[0].kwargs["headers"]
+    assert calls[1].kwargs["headers"]["X-Goog-Colab-Token"] == (
+        "CANARY-secret-colab-token-one"
+    )
+    assert "X-Goog-Colab-Token" not in calls[2].kwargs["headers"]
+    assert calls[3].kwargs["headers"]["X-Goog-Colab-Token"] == (
+        "CANARY-secret-colab-token-two"
+    )
+    for call in calls:
         assert 0 < call.kwargs["timeout"] <= 30
+        assert call.kwargs["headers"]["Accept"] == "application/json"
+        assert call.kwargs["headers"]["X-Colab-Client-Agent"] == "colab-cli"
+        assert "X-Colab-VS-Code-App-Name" not in call.kwargs["headers"]
+        assert "X-Colab-VS-Code-Extension-Version" not in call.kwargs["headers"]
+    for call in (calls[1], calls[3]):
+        assert not ({"data", "files", "json"} & call.kwargs.keys())
     serialized_history = json.dumps(
         [call.args for call in history.log_event.call_args_list]
     )
-    assert "secret-colab-token" not in serialized_history
+    assert "CANARY-secret-colab-token" not in serialized_history
+
+    http_events = [
+        call.args[2]
+        for call in history.log_event.call_args_list
+        if call.args[1] == "drive_auth_http"
+    ]
+    assert [(event["phase"], event["method"]) for event in http_events] == [
+        ("dry_run_token", "GET"),
+        ("dry_run", "POST"),
+        ("propagate_token", "GET"),
+        ("propagate", "POST"),
+    ]
+    assert all(
+        set(event)
+        == {"phase", "method", "status", "byte_count", "success", "has_redirect"}
+        for event in http_events
+    )
 
 
 def test_drive_coordinator_accepts_integer_message_id_and_preserves_its_type():
-    coordinator, _credentials, _history, _emit = _coordinator(
-        [
-            _response({"token": "token"}),
-            _response({"success": True}),
-            _response({"success": True}),
-        ]
-    )
+    coordinator, _credentials, _history, _emit = _coordinator(_authorized_responses())
     wsclient = MagicMock()
 
     assert coordinator.intercept(_request(msg_id=17), wsclient) is True
@@ -102,13 +145,7 @@ def test_drive_coordinator_accepts_integer_message_id_and_preserves_its_type():
 
 def test_drive_coordinator_does_not_persist_raw_message_id():
     message_id = "CANARY-colab-message-id"
-    coordinator, _credentials, history, _emit = _coordinator(
-        [
-            _response({"token": "token"}),
-            _response({"success": True}),
-            _response({"success": True}),
-        ]
-    )
+    coordinator, _credentials, history, _emit = _coordinator(_authorized_responses())
 
     coordinator.intercept(_request(msg_id=message_id), MagicMock())
     coordinator.wait()
@@ -130,9 +167,9 @@ def test_drive_coordinator_redacts_valid_authorization_uri():
     consent_waiter = MagicMock()
     coordinator, _credentials, history, emit = _coordinator(
         [
-            _response({"token": "token"}),
+            _response({"token": "dry-token"}),
             _response({"success": False, "unauthorized_redirect_uri": uri}),
-            _response({"success": True}),
+            _response({"token": "final-token"}),
             _response({"success": True}),
         ],
         consent_waiter=consent_waiter,
@@ -153,15 +190,14 @@ def test_drive_coordinator_redacts_valid_authorization_uri():
     wsclient.stdin_channel.send.assert_called_once()
 
 
-def test_drive_coordinator_polls_until_consent_is_observed_before_propagating():
+def test_drive_coordinator_waits_for_one_continue_then_propagates_once():
     uri = "https://accounts.google.com/o/oauth2/v2/auth?state=secret-state"
     consent_waiter = MagicMock()
     coordinator, credentials, _history, emit = _coordinator(
         [
-            _response({"token": "token"}),
+            _response({"token": "dry-token"}),
             _response({"success": False, "unauthorized_redirect_uri": uri}),
-            _response({"success": False, "unauthorized_redirect_uri": uri}),
-            _response({"success": True}),
+            _response({"token": "final-token"}),
             _response({"success": True}),
         ],
         consent_waiter=consent_waiter,
@@ -171,12 +207,50 @@ def test_drive_coordinator_polls_until_consent_is_observed_before_propagating():
     coordinator.intercept(_request(), wsclient)
     coordinator.wait()
 
-    assert consent_waiter.call_count == 2
-    assert credentials.request.call_count == 5
+    consent_waiter.assert_called_once()
+    assert credentials.request.call_count == 4
     assert sum(uri in str(call.args) for call in emit.call_args_list) == 1
-    dry_run_calls = credentials.request.call_args_list[1:4]
-    assert all(call.kwargs["params"]["dryrun"] == "true" for call in dry_run_calls)
-    assert credentials.request.call_args_list[4].kwargs["params"]["dryrun"] == "false"
+    assert [
+        call.kwargs["params"]["dryrun"]
+        for call in credentials.request.call_args_list
+    ] == ["true", "true", "false", "false"]
+    wsclient.stdin_channel.send.assert_called_once()
+
+
+def test_drive_coordinator_already_authorized_does_not_request_continue():
+    consent_waiter = MagicMock()
+    coordinator, credentials, _history, emit = _coordinator(
+        _authorized_responses(), consent_waiter=consent_waiter
+    )
+
+    coordinator.intercept(_request(), MagicMock())
+    coordinator.wait()
+
+    consent_waiter.assert_not_called()
+    assert credentials.request.call_count == 4
+    assert not any("Visit:" in str(call.args) for call in emit.call_args_list)
+
+
+def test_final_propagation_response_is_authoritative_and_sanitized():
+    canary = "CANARY-final-response-body"
+    coordinator, _credentials, history, _emit = _coordinator(
+        [
+            _response({"token": "dry-token"}),
+            _response({"success": True}),
+            _response({"token": "final-token"}),
+            _response({"success": False, "detail": canary}),
+        ]
+    )
+    wsclient = MagicMock()
+
+    coordinator.intercept(_request(), wsclient)
+    with pytest.raises(DriveAuthError, match="propagation_rejected") as raised:
+        coordinator.wait()
+
+    assert canary not in str(raised.value)
+    assert canary not in json.dumps(
+        [call.args for call in history.log_event.call_args_list]
+    )
     wsclient.stdin_channel.send.assert_called_once()
 
 
@@ -221,13 +295,7 @@ def test_drive_coordinator_sanitizes_failure_and_replies(response, error_code):
 
 
 def test_drive_coordinator_deduplicates_message_id():
-    coordinator, _credentials, _history, _emit = _coordinator(
-        [
-            _response({"token": "token"}),
-            _response({"success": True}),
-            _response({"success": True}),
-        ]
-    )
+    coordinator, _credentials, _history, _emit = _coordinator(_authorized_responses())
     wsclient = MagicMock()
     message = _request()
 
@@ -271,7 +339,13 @@ def test_non_drive_colab_request_is_not_intercepted():
 def test_drive_response_validation(response, error_code):
     responses = [response]
     if error_code is None:
-        responses.extend([_response({"success": True}), _response({"success": True})])
+        responses.extend(
+            [
+                _response({"success": True}),
+                _response({"token": "fresh-token"}),
+                _response({"success": True}),
+            ]
+        )
     coordinator, *_ = _coordinator(responses)
     wsclient = MagicMock()
     coordinator.intercept(_request(), wsclient)
@@ -298,13 +372,7 @@ def test_drive_request_timeout_is_sanitized_and_unblocks():
 
 
 def test_drive_reply_failure_is_surfaced():
-    coordinator, *_ = _coordinator(
-        [
-            _response({"token": "token"}),
-            _response({"success": True}),
-            _response({"success": True}),
-        ]
-    )
+    coordinator, *_ = _coordinator(_authorized_responses())
     wsclient = MagicMock()
     wsclient.stdin_channel.send.side_effect = OSError("secret transport detail")
 
@@ -343,6 +411,62 @@ def test_drive_consent_wait_is_cancellable_and_unblocks():
 
     assert time.monotonic() - started < 0.5
     wsclient.stdin_channel.send.assert_called_once()
+
+
+def test_drive_consent_wait_reports_no_tty_without_leaking_os_error():
+    def unavailable_tty(*_args, **_kwargs):
+        raise OSError("CANARY-device-detail")
+
+    with pytest.raises(DriveAuthError, match="tty_unavailable") as raised:
+        _wait_for_continue(1, threading.Event(), tty_opener=unavailable_tty)
+
+    assert "CANARY-device-detail" not in str(raised.value)
+
+
+def test_drive_consent_wait_reports_tty_eof():
+    tty = io.StringIO("")
+
+    with pytest.raises(DriveAuthError, match="tty_eof"):
+        _wait_for_continue(
+            1,
+            threading.Event(),
+            tty_opener=lambda *_args, **_kwargs: tty,
+            selector=lambda *_args, **_kwargs: ([tty], [], []),
+        )
+
+
+def test_drive_coordinator_enforces_deadline_before_any_http_request():
+    coordinator, credentials, _history, _emit = _coordinator(
+        [], deadline=time.monotonic() - 1
+    )
+    wsclient = MagicMock()
+
+    coordinator.intercept(_request(), wsclient)
+    with pytest.raises(DriveAuthError, match="deadline_exceeded"):
+        coordinator.wait()
+
+    credentials.request.assert_not_called()
+    wsclient.stdin_channel.send.assert_called_once()
+
+
+def test_drive_secret_canaries_are_absent_from_history_and_failures():
+    token_canary = "CANARY-xsrf-secret"
+    body_canary = "CANARY-body-secret"
+    cookie_canary = "CANARY-cookie-secret"
+    response = _response({"error": body_canary}, status=400)
+    response.headers = {"Set-Cookie": cookie_canary}
+    response.cookies = {"session": cookie_canary}
+    coordinator, _credentials, history, _emit = _coordinator([response])
+    wsclient = MagicMock()
+
+    coordinator.intercept(_request(msg_id=token_canary), wsclient)
+    with pytest.raises(DriveAuthError) as raised:
+        coordinator.wait()
+
+    persisted = json.dumps([call.args for call in history.log_event.call_args_list])
+    for canary in (token_canary, body_canary, cookie_canary):
+        assert canary not in persisted
+        assert canary not in str(raised.value)
 
 
 def test_drive_worker_does_not_strand_request_arriving_as_queue_drains(
