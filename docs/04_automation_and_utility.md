@@ -1,5 +1,6 @@
 ---
 log:
+2026-08-18: Live-accepted the corrected Drive flow on one disposable CPU runtime. The coordinator performed dry-run GET/POST, displayed one validated consent URL, accepted one explicit human Continue, fetched a fresh XSRF token, and completed the bodyless final POST with HTTP 200 and `success: true`; history contains exactly one `drive_auth_success` and no consent URL, Authorization header, or XSRF-header material. `drive.mount('/content/drive', readonly=True)` completed, and an exact-hash metadata-only probe found one `fuse.drive` mount with `ro`, the expected fixed lake-root directory, `training_authorized: false`, no Drive content read, and no Drive write. The runtime was released and an account-wide session query returned an empty list. This verifies the repaired native protocol and read-only source generation; it does not supply the separate exact-scope Drive identity observation.
 2026-08-18: Retried the corrected flow on one disposable CPU runtime after a guarded nonce execution succeeded. The dry run emitted one validated consent URL, but the human approval occurred after the 600-second command deadline, so the coordinator had already cancelled before Continue and no final propagation request was made. A retry then failed locally before contacting Colab because host ADC required separate reauthentication. The exact runtime endpoint later returned HTTP 404; its stale local keep-alive and session record were removed. Account-wide absence could not be freshly listed with expired ADC. This attempt does not verify final propagation, mounting, or an upstream failure. Drive authorization errors now exit with one sanitized phase-specific message instead of rendering Typer's internal traceback.
 2026-08-18: Corrected Drive credential propagation after comparing the timed-out live trace with the official Colab client. Correlation IDs may be strings or integers and are echoed with their exact wire type while raw values stay out of history. The coordinator now performs one fresh-token/bodyless dry run, waits for one explicit `/dev/tty` Continue after the browser's close-window page when consent is needed, then performs a second fresh-token/bodyless final propagation and accepts only `success: true`. It no longer polls, reuses an XSRF token, or sends multipart `file_id`. Added `colab drivemount --read-only`, which generates `drive.mount(path, readonly=True)` while preserving the read-write default. The packaged runtime continues to use the released `jupyter-kernel-client==1.0.1` API. The earlier live timeout verifies the removed polling deadlock, not final propagation or mounting; live acceptance of the corrected sequence remains pending.
 2026-08-15: Hardened the compatibility automation boundary after credential-bearing request metadata, response bodies, Drive authorization URLs, and stdin values were found in local diagnostics. HTTP logs are now metadata-only and query-free behind a rotating private sink with defense-in-depth redaction; Drive propagation uses a bounded, cancellable coordinator with strict response and redirect validation; interactive execution has a real 600-second wall-clock deadline plus best-effort kernel interrupt; generated Drive/install source uses Python literals; and legacy history can be scrubbed idempotently without racing active writers. Canary tests assert secrets are absent from every persisted and rendered sink.
@@ -204,6 +205,21 @@ JSON mode emits one schema-v1 result and maps a proven kernel error to
     session record were removed. Expired ADC prevented a fresh account-wide
     session listing. This attempt verifies neither final propagation nor a
     Drive mount, and it supplies no basis for classifying an upstream failure.
+-   **Corrected-flow live acceptance (2026-08-18)**: After refreshing ADC, a
+    new disposable CPU runtime passed the guarded readiness probe. The
+    coordinator recorded dry-run GET/POST followed, after one human Continue,
+    by a fresh-token final GET and bodyless POST. Both POSTs returned HTTP 200;
+    the dry run returned `success: false` with a redirect and final propagation
+    returned `success: true`. History contains exactly one
+    `drive_auth_success`, while scans found no persisted consent URL,
+    Authorization header, or XSRF-header material. The generated read-only
+    mount command completed. An exact-hash metadata-only execution observed one
+    `fuse.drive` mount at `/content/drive` with `ro` and confirmed the fixed
+    expected lake-root directory without listing names or reading file
+    contents. It reported no Drive write and `training_authorized: false`.
+    The CPU runtime was released, and a final account-wide session query
+    returned an empty list. The separate exact-scope Drive identity observation
+    was not produced by this CLI acceptance test.
 
 ### 4. Logging and Notebook Capture (`colab log`)
 
